@@ -58,7 +58,20 @@ def init_db():
                 print(f"[FTS5 Init Warning]: {fts_err}")
 
         # Create relational tables
-        from app.db.schema import ProjectItem, TeamsMessage, ChatSession, ChatMessage, DataSource, AuditEvent
+        from app.db.schema import ProjectItem, TeamsMessage, ChatSession, ChatMessage, DataSource, AuditEvent, Workspace
         SQLModel.metadata.create_all(engine)
+
+        # Safe schema column migrations for SQLite
+        with sqlite3.connect(DB_FILE) as conn:
+            try:
+                conn.execute("ALTER TABLE chat_sessions ADD COLUMN user_aad_id TEXT DEFAULT 'default_user';")
+                conn.commit()
+            except Exception:
+                pass
+            try:
+                conn.execute("ALTER TABLE chat_sessions ADD COLUMN user_name TEXT DEFAULT 'Team Member';")
+                conn.commit()
+            except Exception:
+                pass
     except Exception as e:
         print(f"[Database init warning]: {e}")

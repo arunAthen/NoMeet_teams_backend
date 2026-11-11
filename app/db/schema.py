@@ -73,6 +73,13 @@ class DataSource(SQLModel, table=True):
     last_synced: Optional[datetime] = Field(default_factory=utc_now)
     health_status: str = Field(default="healthy")
 
+class Workspace(SQLModel, table=True):
+    __tablename__ = "workspaces"
+    id: str = Field(primary_key=True)
+    name: str
+    workspace_type: str = Field(default="chat")
+    last_active: Optional[datetime] = Field(default_factory=utc_now)
+
 class AuditEvent(SQLModel, table=True):
     __tablename__ = "audit_events"
     id: Optional[int] = Field(default=None, primary_key=True)

@@ -1,5 +1,15 @@
+const API_BASE = (window.CONFIG && window.CONFIG.API_BASE_URL) ? window.CONFIG.API_BASE_URL.replace(/\/+$/, "") : "";
 let currentSessionId = null;
 let currentGroupId = "all";
+
+// User identity state (Strict Personal Bot Isolation)
+let currentUserId = localStorage.getItem("nomeet_user_aad_id") || "";
+let currentUserName = localStorage.getItem("nomeet_user_name") || "Team Member";
+
+if (!currentUserId) {
+  currentUserId = "user_" + Math.random().toString(36).substring(2, 10);
+  localStorage.setItem("nomeet_user_aad_id", currentUserId);
+}
 
 // Elements
 const groupSelector = document.getElementById("groupSelector");
@@ -9,6 +19,62 @@ const newSessionBtn = document.getElementById("newSessionBtn");
 const chatViewport = document.getElementById("chatViewport");
 const chatForm = document.getElementById("chatForm");
 const chatInput = document.getElementById("chatInput");
+const userDisplayName = document.getElementById("userDisplayName");
+const userAvatar = document.getElementById("userAvatar");
+
+function updateUserUI() {
+  if (userDisplayName) {
+    userDisplayName.innerText = currentUserName || "Personal Bot";
+  }
+  if (userAvatar) {
+    if (currentUserName && currentUserName !== "Team Member") {
+      const parts = currentUserName.trim().split(" ");
+      const initials = parts.length > 1 ? (parts[0][0] + parts[parts.length - 1][0]).toUpperCase() : parts[0].slice(0, 2).toUpperCase();
+      userAvatar.innerText = initials;
+    } else {
+      userAvatar.innerText = "👤";
+    }
+  }
+}
+updateUserUI();
+
+// Clean workspace title decoder
+function cleanWorkspaceLabel(id, rawName) {
+  if (rawName && !rawName.startsWith("19:") && !rawName.includes("@thread")) {
+    try {
+      return decodeURIComponent(rawName);
+    } catch (e) {
+      return rawName;
+    }
+  }
+  const cleanId = decodeURIComponent(id || "");
+  if (cleanId.startsWith("19:") || cleanId.includes("@thread")) {
+    const short = cleanId.split("@")[0].replace("19:", "").substring(0, 8);
+    return `Chat ${short.toUpperCase()}`;
+  }
+  return cleanId ? cleanId.replace(/_/g, " ").replace(/\b\w/g, l => l.toUpperCase()) : "General Workspace";
+}
+
+// Relative time helper
+function timeAgo(dateString) {
+  if (!dateString) return "";
+  try {
+    const date = new Date(dateString);
+    const now = new Date();
+    const diffSec = Math.floor((now - date) / 1000);
+    if (diffSec < 60) return "Just now";
+    const diffMin = Math.floor(diffSec / 60);
+    if (diffMin < 60) return `${diffMin}m ago`;
+    const diffHr = Math.floor(diffMin / 60);
+    if (diffHr < 24) return `${diffHr}h ago`;
+    const diffDays = Math.floor(diffHr / 24);
+    if (diffDays === 1) return "Yesterday";
+    if (diffDays < 7) return `${diffDays}d ago`;
+    return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  } catch (e) {
+    return "";
+  }
+}
 
 // Initialize Microsoft Teams JS SDK
 if (window.microsoftTeams) {
@@ -18,34 +84,71 @@ if (window.microsoftTeams) {
     } catch (e) {
       console.log("Teams notifySuccess:", e);
     }
-    microsoftTeams.app.getContext().then((context) => {
+
+    // Support for Group Chat & Team Channel Configurable Tabs
+    try {
+      if (microsoftTeams.pages && microsoftTeams.pages.config) {
+        microsoftTeams.pages.config.registerOnSaveHandler((saveEvent) => {
+          microsoftTeams.pages.config.setConfig({
+            entityId: "noMeetCockpitTab",
+            contentUrl: "https://no-meet-teams-backend.vercel.app/teams/tab/index.html",
+            websiteUrl: "https://no-meet-teams-backend.vercel.app/teams/tab/index.html",
+            suggestedDisplayName: "NoMeet Cockpit"
+          });
+          saveEvent.notifySuccess();
+        });
+        microsoftTeams.pages.config.setValidityState(true);
+      }
+    } catch (cfgErr) {
+      console.log("Tab config handler registration:", cfgErr);
+    }
+
+    microsoftTeams.app.getContext().then(async (context) => {
       if (context.app && context.app.theme) {
         document.body.className = context.app.theme === "dark" ? "theme-dark" : "theme-default";
       }
-      // Auto-detect group/channel from Teams context
+
+      // 1. Capture user profile for Strict Personal Privacy
+      if (context.user) {
+        if (context.user.id) currentUserId = context.user.id;
+        else if (context.user.userPrincipalName) currentUserId = context.user.userPrincipalName;
+        else if (context.user.loginHint) currentUserId = context.user.loginHint;
+
+        if (context.user.displayName) currentUserName = context.user.displayName;
+        else if (context.user.userPrincipalName) currentUserName = context.user.userPrincipalName.split("@")[0];
+
+        localStorage.setItem("nomeet_user_aad_id", currentUserId);
+        localStorage.setItem("nomeet_user_name", currentUserName);
+        updateUserUI();
+      }
+
+      // 2. Auto-detect & Auto-register group/channel dynamically
       const teamsGroupId = context.chat?.id || context.channel?.id || context.team?.groupId;
       if (teamsGroupId) {
         currentGroupId = teamsGroupId;
-        if (groupSelector) {
-          let found = false;
-          for (let opt of groupSelector.options) {
-            if (opt.value === currentGroupId) {
-              groupSelector.value = currentGroupId;
-              found = true;
-              break;
-            }
-          }
-          if (!found) {
-            const opt = document.createElement("option");
-            opt.value = currentGroupId;
-            opt.innerText = `👥 Current Chat: ${currentGroupId.slice(0, 15)}...`;
-            groupSelector.appendChild(opt);
-            groupSelector.value = currentGroupId;
-          }
-          updateWorkspaceLabel();
-          loadMetrics();
-          loadSessions();
+        const friendlyName = context.channel?.displayName || context.chat?.topic || context.team?.displayName || "";
+        
+        try {
+          await fetch(`${API_BASE}/api/v1/teams/groups/register`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              id: teamsGroupId,
+              name: friendlyName,
+              workspace_type: context.channel ? "channel" : "chat"
+            })
+          });
+        } catch (regErr) {
+          console.warn("Auto-register workspace error:", regErr);
         }
+
+        await loadGroups();
+        if (groupSelector) {
+          groupSelector.value = currentGroupId;
+          updateWorkspaceLabel();
+        }
+        await loadMetrics();
+        await loadSessions();
       }
     });
   }).catch(() => {
@@ -63,7 +166,7 @@ function updateWorkspaceLabel() {
 // Load Groups / Workspaces Dropdown
 async function loadGroups() {
   try {
-    const res = await fetch("/api/v1/teams/groups");
+    const res = await fetch(`${API_BASE}/api/v1/teams/groups`);
     const data = await res.json();
     if (!groupSelector) return;
 
@@ -78,7 +181,21 @@ async function loadGroups() {
     }
 
     if (currentGroupId && currentGroupId !== "all") {
-      groupSelector.value = currentGroupId;
+      let match = false;
+      for (let opt of groupSelector.options) {
+        if (opt.value === currentGroupId) {
+          groupSelector.value = currentGroupId;
+          match = true;
+          break;
+        }
+      }
+      if (!match) {
+        const opt = document.createElement("option");
+        opt.value = currentGroupId;
+        opt.innerText = `📁 ${cleanWorkspaceLabel(currentGroupId)}`;
+        groupSelector.appendChild(opt);
+        groupSelector.value = currentGroupId;
+      }
     }
     updateWorkspaceLabel();
   } catch (e) {
@@ -101,14 +218,14 @@ if (groupSelector) {
 async function loadMetrics() {
   try {
     const url = currentGroupId && currentGroupId !== "all" 
-      ? `/api/v1/teams/overview?group_id=${encodeURIComponent(currentGroupId)}` 
-      : "/api/v1/teams/overview";
+      ? `${API_BASE}/api/v1/teams/overview?group_id=${encodeURIComponent(currentGroupId)}` 
+      : `${API_BASE}/api/v1/teams/overview`;
     const res = await fetch(url);
     const data = await res.json();
-    document.getElementById("crMetric").innerText = `${data.change_requests.total} CRs`;
-    document.getElementById("bugMetric").innerText = `${data.bugs.total} Bugs`;
-    document.getElementById("msgMetric").innerText = `${data.indexed_communications} msgs`;
-    document.getElementById("specMetric").innerText = `${data.indexed_specifications} specs`;
+    document.getElementById("crMetric").innerText = `${data.change_requests?.total || 0} CRs`;
+    document.getElementById("bugMetric").innerText = `${data.bugs?.total || 0} Bugs`;
+    document.getElementById("msgMetric").innerText = `${data.indexed_communications || 0} msgs`;
+    document.getElementById("specMetric").innerText = `${data.indexed_specifications || 0} specs`;
   } catch (e) {
     console.error("Error loading metrics:", e);
   }
@@ -179,41 +296,69 @@ function appendMessage(role, content, evidence = [], evalScores = null) {
   chatViewport.scrollTop = chatViewport.scrollHeight;
 }
 
-// Load Sessions List (Group-Scoped)
+// Load Sessions List (Strict Personal User Isolation)
 async function loadSessions() {
   try {
-    const url = currentGroupId && currentGroupId !== "all" 
-      ? `/api/v1/teams/sessions?group_id=${encodeURIComponent(currentGroupId)}` 
-      : "/api/v1/teams/sessions";
-    const res = await fetch(url);
+    const params = new URLSearchParams();
+    if (currentUserId) params.set("user_id", currentUserId);
+    if (currentGroupId && currentGroupId !== "all") params.set("group_id", currentGroupId);
+
+    const res = await fetch(`${API_BASE}/api/v1/teams/sessions?${params.toString()}`);
     const sessions = await res.json();
     sessionsList.innerHTML = "";
 
-    if (sessions.length === 0) {
+    if (!Array.isArray(sessions) || sessions.length === 0) {
       await createNewSession();
       return;
     }
 
     sessions.forEach(s => {
-      const item = document.createElement("div");
-      item.className = `session-item ${s.session_id === currentSessionId ? "active" : ""}`;
-      item.onclick = () => selectSession(s.session_id);
+      const card = document.createElement("div");
+      card.className = `session-card ${s.session_id === currentSessionId ? "active" : ""}`;
+      card.dataset.sessionId = s.session_id;
+      card.onclick = () => selectSession(s.session_id);
 
-      const title = document.createElement("span");
-      title.className = "session-title";
+      // Card Header: Project Micro-Badge & Timestamp
+      const header = document.createElement("div");
+      header.className = "session-card-header";
+
+      const projTag = document.createElement("span");
+      projTag.className = "session-project-tag";
+      const cleanProj = s.project_name || cleanWorkspaceLabel(s.project_id);
+      projTag.innerText = `🏷️ ${cleanProj}`;
+
+      const timeSpan = document.createElement("span");
+      timeSpan.className = "session-time";
+      timeSpan.innerText = timeAgo(s.updated_at || s.created_at);
+
+      header.appendChild(projTag);
+      header.appendChild(timeSpan);
+
+      // Card Title
+      const title = document.createElement("div");
+      title.className = "session-card-title";
       title.innerText = s.title || "Conversation";
 
+      // Card Snippet
+      const snippet = document.createElement("div");
+      snippet.className = "session-card-snippet";
+      snippet.innerText = s.last_message || "No messages yet";
+
+      // Delete Button
       const delBtn = document.createElement("button");
       delBtn.className = "btn-del-session";
       delBtn.innerHTML = "✕";
+      delBtn.title = "Delete Conversation";
       delBtn.onclick = (e) => {
         e.stopPropagation();
         deleteSession(s.session_id);
       };
 
-      item.appendChild(title);
-      item.appendChild(delBtn);
-      sessionsList.appendChild(item);
+      card.appendChild(header);
+      card.appendChild(title);
+      card.appendChild(snippet);
+      card.appendChild(delBtn);
+      sessionsList.appendChild(card);
     });
 
     if (!currentSessionId && sessions.length > 0) {
@@ -227,32 +372,40 @@ async function loadSessions() {
 // Select Session & load messages
 async function selectSession(sessionId) {
   currentSessionId = sessionId;
-  document.querySelectorAll(".session-item").forEach(el => el.classList.remove("active"));
-  
-  // Highlight active
-  document.querySelectorAll(".session-item").forEach(el => {
-    if (el.onclick && el.onclick.toString().includes(sessionId)) el.classList.add("active");
+  document.querySelectorAll(".session-card").forEach(el => {
+    if (el.dataset.sessionId === sessionId) {
+      el.classList.add("active");
+    } else {
+      el.classList.remove("active");
+    }
   });
 
   chatViewport.innerHTML = "";
   try {
-    const res = await fetch(`/api/v1/teams/sessions/${sessionId}`);
+    const res = await fetch(`${API_BASE}/api/v1/teams/sessions/${sessionId}`);
     const data = await res.json();
-    data.messages.forEach(m => {
-      appendMessage(m.role, m.content, m.evidence, m.eval_scores);
-    });
+    if (data.messages && data.messages.length > 0) {
+      data.messages.forEach(m => {
+        appendMessage(m.role, m.content, m.evidence, m.eval_scores);
+      });
+    }
   } catch (e) {
     console.error("Error loading session messages:", e);
   }
 }
 
-// Create New Session (Group-Scoped)
+// Create New Session (Strict Personal User Isolation)
 async function createNewSession() {
   try {
-    const res = await fetch("/api/v1/teams/sessions", {
+    const res = await fetch(`${API_BASE}/api/v1/teams/sessions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: "New Conversation", group_id: currentGroupId })
+      body: JSON.stringify({
+        title: "New Conversation",
+        group_id: currentGroupId,
+        user_id: currentUserId,
+        user_name: currentUserName
+      })
     });
     const data = await res.json();
     currentSessionId = data.session_id;
@@ -266,7 +419,7 @@ async function createNewSession() {
 // Delete Session
 async function deleteSession(sessionId) {
   try {
-    await fetch(`/api/v1/teams/sessions/${sessionId}`, { method: "DELETE" });
+    await fetch(`${API_BASE}/api/v1/teams/sessions/${sessionId}`, { method: "DELETE" });
     if (currentSessionId === sessionId) {
       currentSessionId = null;
     }
@@ -299,10 +452,16 @@ chatForm.addEventListener("submit", async (e) => {
   chatViewport.scrollTop = chatViewport.scrollHeight;
 
   try {
-    const res = await fetch("/api/v1/teams/query", {
+    const res = await fetch(`${API_BASE}/api/v1/teams/query`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query: q, session_id: currentSessionId, group_id: currentGroupId })
+      body: JSON.stringify({
+        query: q,
+        session_id: currentSessionId,
+        group_id: currentGroupId,
+        user_id: currentUserId,
+        user_name: currentUserName
+      })
     });
     const data = await res.json();
     const tb = document.getElementById("thinkingBubble");

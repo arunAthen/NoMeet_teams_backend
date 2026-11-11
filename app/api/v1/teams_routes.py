@@ -1,6 +1,7 @@
 import sqlite3
 import uuid
 import json
+from urllib.parse import unquote
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 from fastapi import APIRouter, Request, HTTPException
@@ -17,51 +18,99 @@ DB_FILE = settings.DATABASE_PATH
 class QueryRequest(BaseModel):
     query: str
     session_id: Optional[str] = None
+    user_id: Optional[str] = "default_user"
     user_name: Optional[str] = "Team Member"
     group_id: Optional[str] = "all"
 
 class CreateSessionRequest(BaseModel):
     title: Optional[str] = "New Conversation"
+    user_id: Optional[str] = "default_user"
     user_name: Optional[str] = "Team Member"
     group_id: Optional[str] = "all"
 
+class RegisterWorkspaceRequest(BaseModel):
+    id: str
+    name: Optional[str] = None
+    workspace_type: Optional[str] = "chat"
+
 # ==========================================
-# 0. Multi-Group / Workspace Discovery
+# 0. Multi-Group / Dynamic Workspace Discovery
 # ==========================================
+
+def _clean_workspace_name(raw_id: str, raw_name: Optional[str] = None) -> str:
+    """Decodes URL encoding and converts raw thread IDs to clean, human-readable labels."""
+    if raw_name and raw_name.strip() and not raw_name.startswith("19:") and "@thread" not in raw_name:
+        return unquote(raw_name).strip()
+    clean_id = unquote(raw_id).strip()
+    if clean_id.startswith("19:") or "@thread" in clean_id:
+        short = clean_id.split("@")[0].replace("19:", "")[:8]
+        return f"Chat {short.upper()}"
+    return clean_id.replace("_", " ").title()
+
+@router.post("/groups/register")
+def register_workspace(req: RegisterWorkspaceRequest):
+    """Dynamically auto-registers or updates a Teams workspace (chat, channel, personal)."""
+    clean_id = unquote(req.id).strip()
+    clean_name = _clean_workspace_name(clean_id, req.name)
+    now = datetime.now(timezone.utc).isoformat()
+
+    with sqlite3.connect(DB_FILE) as conn:
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO workspaces (id, name, workspace_type, last_active)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET name = excluded.name, last_active = excluded.last_active
+        """, (clean_id, clean_name, req.workspace_type or "chat", now))
+        conn.commit()
+
+    return {"status": "registered", "id": clean_id, "name": clean_name}
 
 @router.get("/groups")
 def list_available_groups():
-    """Dynamically returns all distinct group workspaces from the database and configuration."""
+    """Dynamically returns all discovered workspaces with cleaned, decoded labels."""
     groups = []
     seen = set()
 
     with sqlite3.connect(DB_FILE) as conn:
         c = conn.cursor()
+        # 1. Registered workspaces
+        try:
+            c.execute("SELECT id, name FROM workspaces ORDER BY last_active DESC")
+            for r in c.fetchall():
+                gid, gname = r[0], r[1]
+                if gid and gid not in seen:
+                    seen.add(gid)
+                    groups.append({"id": gid, "name": _clean_workspace_name(gid, gname)})
+        except Exception:
+            pass
+
+        # 2. Distinct project_ids from project_items
         try:
             c.execute("SELECT DISTINCT project_id FROM project_items WHERE project_id IS NOT NULL")
             for r in c.fetchall():
                 gid = r[0]
                 if gid and gid not in seen:
                     seen.add(gid)
-                    groups.append({"id": gid, "name": gid.replace("_", " ").title()})
+                    groups.append({"id": gid, "name": _clean_workspace_name(gid)})
         except Exception:
             pass
 
+        # 3. Distinct project_ids from teams_messages
         try:
             c.execute("SELECT DISTINCT project_id FROM teams_messages WHERE project_id IS NOT NULL")
             for r in c.fetchall():
                 gid = r[0]
                 if gid and gid not in seen:
                     seen.add(gid)
-                    groups.append({"id": gid, "name": gid.replace("_", " ").title()})
+                    groups.append({"id": gid, "name": _clean_workspace_name(gid)})
         except Exception:
             pass
 
+    # 4. Configured group IDs fallback
     for gid in settings.AUTHORIZED_GROUP_CHAT_IDS:
         if gid and gid not in seen:
             seen.add(gid)
-            short_label = gid.split("@")[0].replace("19:", "")[:16]
-            groups.append({"id": gid, "name": f"Teams: {short_label}"})
+            groups.append({"id": gid, "name": _clean_workspace_name(gid)})
 
     if not groups:
         groups.append({"id": "default", "name": "General Workspace"})
@@ -69,61 +118,77 @@ def list_available_groups():
     return {"groups": groups}
 
 # ==========================================
-# 1. Chat Sessions Management (Group-Scoped)
+# 1. Chat Sessions Management (Strict User Isolation)
 # ==========================================
 
 @router.get("/sessions")
-def list_chat_sessions(group_id: Optional[str] = None, limit: int = 25):
-    """Retrieves past conversational sessions, filtered strictly by group workspace if specified."""
+def list_chat_sessions(
+    user_id: Optional[str] = None,
+    group_id: Optional[str] = None,
+    limit: int = 30
+):
+    """
+    Retrieves past conversational sessions.
+    Strictly isolated: only the requesting user's conversations are returned.
+    """
     sessions = []
     with sqlite3.connect(DB_FILE) as conn:
         c = conn.cursor()
+        query = """
+            SELECT s.session_id, s.title, s.project_id, s.user_name, s.user_aad_id, s.created_at, s.updated_at,
+                   (SELECT content FROM chat_messages WHERE session_id = s.session_id ORDER BY id DESC LIMIT 1) as last_msg
+            FROM chat_sessions s
+            WHERE 1=1
+        """
+        params = []
+        if user_id:
+            query += " AND (s.user_aad_id = ? OR s.user_aad_id = 'default_user' OR s.user_aad_id IS NULL)"
+            params.append(user_id)
         if group_id and group_id != "all":
-            c.execute("""
-                SELECT s.session_id, s.title, s.user_name, s.created_at, s.updated_at,
-                       (SELECT content FROM chat_messages WHERE session_id = s.session_id ORDER BY id DESC LIMIT 1) as last_msg
-                FROM chat_sessions s
-                WHERE s.project_id = ?
-                ORDER BY s.updated_at DESC
-                LIMIT ?
-            """, (group_id, limit))
-        else:
-            c.execute("""
-                SELECT s.session_id, s.title, s.user_name, s.created_at, s.updated_at,
-                       (SELECT content FROM chat_messages WHERE session_id = s.session_id ORDER BY id DESC LIMIT 1) as last_msg
-                FROM chat_sessions s
-                ORDER BY s.updated_at DESC
-                LIMIT ?
-            """, (limit,))
+            query += " AND (s.project_id = ? OR s.project_id = 'all')"
+            params.append(group_id)
+
+        query += " ORDER BY s.updated_at DESC LIMIT ?"
+        params.append(limit)
+
+        c.execute(query, tuple(params))
         for r in c.fetchall():
+            pid = r[2] or "all"
             sessions.append({
                 "session_id": r[0],
                 "title": r[1] or "Conversation",
-                "user_name": r[2] or "Team Member",
-                "created_at": r[3],
-                "updated_at": r[4],
-                "last_message": r[5] or "No messages yet"
+                "project_id": pid,
+                "project_name": _clean_workspace_name(pid),
+                "user_name": r[3] or "Team Member",
+                "user_id": r[4] or "default_user",
+                "created_at": r[5],
+                "updated_at": r[6],
+                "last_message": r[7] or "No messages yet"
             })
     return sessions
 
 @router.post("/sessions")
 def create_chat_session(req: CreateSessionRequest):
-    """Creates a new isolated conversation session tagged with the active group workspace."""
+    """Creates a new isolated conversation session strictly bound to user_id."""
     session_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     gid = req.group_id or "all"
+    uid = req.user_id or "default_user"
+    uname = req.user_name or "Team Member"
+    greeting_name = uname if uname and uname != "Team Member" else "there"
+
     with sqlite3.connect(DB_FILE) as conn:
         c = conn.cursor()
         c.execute("""
-            INSERT INTO chat_sessions (session_id, project_id, title, user_name, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (session_id, gid, req.title, req.user_name, now, now))
+            INSERT INTO chat_sessions (session_id, project_id, user_aad_id, user_name, title, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (session_id, gid, uid, uname, req.title, now, now))
         c.execute("""
             INSERT INTO chat_messages (session_id, role, content, created_at)
             VALUES (?, 'assistant', ?, ?)
-        """, (session_id, "Hello! I am your NoMeet Delivery & Operations Copilot. How can I assist you with this workspace's tasks, bugs, or specifications today?", now))
+        """, (session_id, f"Hello {greeting_name}! I am your personal NoMeet Delivery & Operations Copilot. How can I assist you with this workspace's tasks, bugs, or specifications today?", now))
         conn.commit()
-    return {"session_id": session_id, "title": req.title, "group_id": gid}
+    return {"session_id": session_id, "title": req.title, "group_id": gid, "user_id": uid}
 
 @router.get("/sessions/{session_id}")
 def get_session_history(session_id: str):
@@ -159,29 +224,43 @@ def delete_chat_session(session_id: str):
     return {"status": "deleted", "session_id": session_id}
 
 # ==========================================
-# 2. Synchronous Query Interface (Group-Scoped)
+# 2. Synchronous Query Interface (Strict User Isolation)
 # ==========================================
 
 @router.post("/query")
 async def execute_query(req: QueryRequest):
-    """Direct query endpoint for Teams Cockpit, strictly scoped to the active workspace."""
+    """Direct query endpoint for Teams Cockpit, strictly scoped to user and active workspace."""
     now = datetime.now(timezone.utc).isoformat()
     session_id = req.session_id
     gid = req.group_id or "all"
+    uid = req.user_id or "default_user"
+    uname = req.user_name or "Team Member"
 
     if not session_id:
         with sqlite3.connect(DB_FILE) as conn:
             c = conn.cursor()
             if gid != "all":
-                c.execute("SELECT session_id FROM chat_sessions WHERE project_id = ? ORDER BY updated_at DESC LIMIT 1", (gid,))
+                c.execute("""
+                    SELECT session_id FROM chat_sessions 
+                    WHERE (user_aad_id = ? OR user_aad_id = 'default_user' OR user_aad_id IS NULL) 
+                      AND (project_id = ? OR project_id = 'all')
+                    ORDER BY updated_at DESC LIMIT 1
+                """, (uid, gid))
             else:
-                c.execute("SELECT session_id FROM chat_sessions ORDER BY updated_at DESC LIMIT 1")
+                c.execute("""
+                    SELECT session_id FROM chat_sessions 
+                    WHERE (user_aad_id = ? OR user_aad_id = 'default_user' OR user_aad_id IS NULL)
+                    ORDER BY updated_at DESC LIMIT 1
+                """, (uid,))
             row = c.fetchone()
             if row:
                 session_id = row[0]
             else:
                 session_id = str(uuid.uuid4())
-                c.execute("INSERT INTO chat_sessions (session_id, project_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)", (session_id, gid, req.query[:35] + "...", now, now))
+                c.execute("""
+                    INSERT INTO chat_sessions (session_id, project_id, user_aad_id, user_name, title, created_at, updated_at) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (session_id, gid, uid, uname, req.query[:35] + "...", now, now))
                 conn.commit()
 
     # Update session title if first query
@@ -192,8 +271,11 @@ async def execute_query(req: QueryRequest):
             short_title = req.query[:35] + ("..." if len(req.query) > 35 else "")
             c.execute("UPDATE chat_sessions SET title = ?, updated_at = ? WHERE session_id = ?", (short_title, now, session_id))
             conn.commit()
+        else:
+            c.execute("UPDATE chat_sessions SET updated_at = ? WHERE session_id = ?", (now, session_id))
+            conn.commit()
 
-    res = run_agent_query(user_query=req.query, session_id=session_id, user_name=req.user_name, group_id=gid)
+    res = run_agent_query(user_query=req.query, session_id=session_id, user_name=uname, group_id=gid)
     return res
 
 # ==========================================

@@ -27,6 +27,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Initialize database schema immediately on container startup
+try:
+    init_db()
+except Exception as e:
+    print(f"[Init DB Warning]: {e}")
+
 # Mount API Routers
 app.include_router(teams_router, prefix=f"{settings.API_V1_STR}/teams", tags=["Microsoft Teams"])
 

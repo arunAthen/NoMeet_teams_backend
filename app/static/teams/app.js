@@ -76,6 +76,35 @@ function timeAgo(dateString) {
   }
 }
 
+// Local cache helpers (for rock-solid persistence across serverless container restarts)
+function getLocalSessions() {
+  try {
+    return JSON.parse(localStorage.getItem(`nomeet_sessions_${currentUserId}`) || "[]");
+  } catch (e) {
+    return [];
+  }
+}
+
+function saveLocalSessions(list) {
+  try {
+    localStorage.setItem(`nomeet_sessions_${currentUserId}`, JSON.stringify(list));
+  } catch (e) {}
+}
+
+function getLocalMessages(sid) {
+  try {
+    return JSON.parse(localStorage.getItem(`nomeet_msgs_${sid}`) || "[]");
+  } catch (e) {
+    return [];
+  }
+}
+
+function saveLocalMessages(sid, msgs) {
+  try {
+    localStorage.setItem(`nomeet_msgs_${sid}`, JSON.stringify(msgs));
+  } catch (e) {}
+}
+
 // Initialize Microsoft Teams JS SDK
 if (window.microsoftTeams) {
   microsoftTeams.app.initialize().then(() => {
@@ -296,76 +325,95 @@ function appendMessage(role, content, evidence = [], evalScores = null) {
   chatViewport.scrollTop = chatViewport.scrollHeight;
 }
 
-// Load Sessions List (Strict Personal User Isolation)
+// Load Sessions List (Strict Personal User Isolation + Persistent Local Cache)
 async function loadSessions() {
+  let serverSessions = [];
   try {
     const params = new URLSearchParams();
     if (currentUserId) params.set("user_id", currentUserId);
     if (currentGroupId && currentGroupId !== "all") params.set("group_id", currentGroupId);
 
     const res = await fetch(`${API_BASE}/api/v1/teams/sessions?${params.toString()}`);
-    const sessions = await res.json();
-    sessionsList.innerHTML = "";
-
-    if (!Array.isArray(sessions) || sessions.length === 0) {
-      await createNewSession();
-      return;
-    }
-
-    sessions.forEach(s => {
-      const card = document.createElement("div");
-      card.className = `session-card ${s.session_id === currentSessionId ? "active" : ""}`;
-      card.dataset.sessionId = s.session_id;
-      card.onclick = () => selectSession(s.session_id);
-
-      // Card Header: Project Micro-Badge & Timestamp
-      const header = document.createElement("div");
-      header.className = "session-card-header";
-
-      const projTag = document.createElement("span");
-      projTag.className = "session-project-tag";
-      const cleanProj = s.project_name || cleanWorkspaceLabel(s.project_id);
-      projTag.innerText = `🏷️ ${cleanProj}`;
-
-      const timeSpan = document.createElement("span");
-      timeSpan.className = "session-time";
-      timeSpan.innerText = timeAgo(s.updated_at || s.created_at);
-
-      header.appendChild(projTag);
-      header.appendChild(timeSpan);
-
-      // Card Title
-      const title = document.createElement("div");
-      title.className = "session-card-title";
-      title.innerText = s.title || "Conversation";
-
-      // Card Snippet
-      const snippet = document.createElement("div");
-      snippet.className = "session-card-snippet";
-      snippet.innerText = s.last_message || "No messages yet";
-
-      // Delete Button
-      const delBtn = document.createElement("button");
-      delBtn.className = "btn-del-session";
-      delBtn.innerHTML = "✕";
-      delBtn.title = "Delete Conversation";
-      delBtn.onclick = (e) => {
-        e.stopPropagation();
-        deleteSession(s.session_id);
-      };
-
-      card.appendChild(header);
-      card.appendChild(title);
-      card.appendChild(snippet);
-      card.appendChild(delBtn);
-      sessionsList.appendChild(card);
-    });
-
-    if (!currentSessionId && sessions.length > 0) {
-      selectSession(sessions[0].session_id);
+    if (res.ok) {
+      serverSessions = await res.json();
     }
   } catch (e) {
-    console.error("Error loading sessions:", e);
+    console.warn("Server sessions fetch warning:", e);
+  }
+
+  // Merge server sessions with local storage cache (dedup by session_id)
+  const localList = getLocalSessions();
+  const sessionMap = new Map();
+  localList.forEach(s => sessionMap.set(s.session_id, s));
+  if (Array.isArray(serverSessions)) {
+    serverSessions.forEach(s => sessionMap.set(s.session_id, s));
+  }
+
+  let mergedSessions = Array.from(sessionMap.values());
+  if (currentGroupId && currentGroupId !== "all") {
+    mergedSessions = mergedSessions.filter(s => s.project_id === currentGroupId || s.project_id === "all");
+  }
+  mergedSessions.sort((a, b) => new Date(b.updated_at || b.created_at || 0) - new Date(a.updated_at || a.created_at || 0));
+  saveLocalSessions(mergedSessions);
+
+  sessionsList.innerHTML = "";
+
+  if (mergedSessions.length === 0) {
+    await createNewSession();
+    return;
+  }
+
+  mergedSessions.forEach(s => {
+    const card = document.createElement("div");
+    card.className = `session-card ${s.session_id === currentSessionId ? "active" : ""}`;
+    card.dataset.sessionId = s.session_id;
+    card.onclick = () => selectSession(s.session_id);
+
+    // Card Header: Project Micro-Badge & Timestamp
+    const header = document.createElement("div");
+    header.className = "session-card-header";
+
+    const projTag = document.createElement("span");
+    projTag.className = "session-project-tag";
+    const cleanProj = s.project_name || cleanWorkspaceLabel(s.project_id);
+    projTag.innerText = `🏷️ ${cleanProj}`;
+
+    const timeSpan = document.createElement("span");
+    timeSpan.className = "session-time";
+    timeSpan.innerText = timeAgo(s.updated_at || s.created_at);
+
+    header.appendChild(projTag);
+    header.appendChild(timeSpan);
+
+    // Card Title
+    const title = document.createElement("div");
+    title.className = "session-card-title";
+    title.innerText = s.title || "Conversation";
+
+    // Card Snippet
+    const snippet = document.createElement("div");
+    snippet.className = "session-card-snippet";
+    snippet.innerText = s.last_message || "No messages yet";
+
+    // Delete Button
+    const delBtn = document.createElement("button");
+    delBtn.className = "btn-del-session";
+    delBtn.innerHTML = "✕";
+    delBtn.title = "Delete Conversation";
+    delBtn.onclick = (e) => {
+      e.stopPropagation();
+      deleteSession(s.session_id);
+    };
+
+    card.appendChild(header);
+    card.appendChild(title);
+    card.appendChild(snippet);
+    card.appendChild(delBtn);
+    sessionsList.appendChild(card);
+  });
+
+  if (!currentSessionId && mergedSessions.length > 0) {
+    selectSession(mergedSessions[0].session_id);
   }
 }
 
@@ -381,23 +429,61 @@ async function selectSession(sessionId) {
   });
 
   chatViewport.innerHTML = "";
+  
+  // Instant render from local cache
+  const cachedMessages = getLocalMessages(sessionId);
+  if (cachedMessages && cachedMessages.length > 0) {
+    cachedMessages.forEach(m => appendMessage(m.role, m.content, m.evidence, m.eval_scores));
+  }
+
+  // Sync latest from backend
   try {
     const res = await fetch(`${API_BASE}/api/v1/teams/sessions/${sessionId}`);
-    const data = await res.json();
-    if (data.messages && data.messages.length > 0) {
-      data.messages.forEach(m => {
-        appendMessage(m.role, m.content, m.evidence, m.eval_scores);
-      });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.messages && data.messages.length > 0) {
+        chatViewport.innerHTML = "";
+        data.messages.forEach(m => appendMessage(m.role, m.content, m.evidence, m.eval_scores));
+        saveLocalMessages(sessionId, data.messages);
+      }
     }
   } catch (e) {
-    console.error("Error loading session messages:", e);
+    console.warn("Backend session messages notice:", e);
   }
 }
 
 // Create New Session (Strict Personal User Isolation)
 async function createNewSession() {
+  const newSid = "sess_" + Math.random().toString(36).substring(2, 12);
+  const now = new Date().toISOString();
+  const greetingName = (currentUserName && currentUserName !== "Team Member") ? currentUserName : "there";
+
+  const newSessionObj = {
+    session_id: newSid,
+    title: "New Conversation",
+    project_id: currentGroupId || "all",
+    project_name: cleanWorkspaceLabel(currentGroupId),
+    user_id: currentUserId,
+    user_name: currentUserName,
+    created_at: now,
+    updated_at: now,
+    last_message: "No messages yet"
+  };
+
+  const initialMsgs = [{
+    role: "assistant",
+    content: `Hello ${greetingName}! I am your personal NoMeet Delivery & Operations Copilot. How can I assist you with this workspace's tasks, bugs, or specifications today?`
+  }];
+
+  saveLocalMessages(newSid, initialMsgs);
+  const localList = getLocalSessions();
+  localList.unshift(newSessionObj);
+  saveLocalSessions(localList);
+  currentSessionId = newSid;
+
+  // Background server registration
   try {
-    const res = await fetch(`${API_BASE}/api/v1/teams/sessions`, {
+    fetch(`${API_BASE}/api/v1/teams/sessions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -406,27 +492,37 @@ async function createNewSession() {
         user_id: currentUserId,
         user_name: currentUserName
       })
-    });
-    const data = await res.json();
-    currentSessionId = data.session_id;
-    await loadSessions();
-    await selectSession(currentSessionId);
-  } catch (e) {
-    console.error("Error creating session:", e);
-  }
+    }).then(r => r.json()).then(data => {
+      if (data && data.session_id) {
+        newSessionObj.session_id = data.session_id;
+        saveLocalMessages(data.session_id, initialMsgs);
+        saveLocalSessions(getLocalSessions());
+      }
+    }).catch(e => {});
+  } catch (e) {}
+
+  await loadSessions();
+  await selectSession(currentSessionId);
 }
 
 // Delete Session
 async function deleteSession(sessionId) {
+  // Remove from local cache
+  const localList = getLocalSessions().filter(s => s.session_id !== sessionId);
+  saveLocalSessions(localList);
   try {
-    await fetch(`${API_BASE}/api/v1/teams/sessions/${sessionId}`, { method: "DELETE" });
-    if (currentSessionId === sessionId) {
-      currentSessionId = null;
-    }
-    loadSessions();
-  } catch (e) {
-    console.error("Error deleting session:", e);
+    localStorage.removeItem(`nomeet_msgs_${sessionId}`);
+  } catch (e) {}
+
+  if (currentSessionId === sessionId) {
+    currentSessionId = null;
   }
+
+  try {
+    fetch(`${API_BASE}/api/v1/teams/sessions/${sessionId}`, { method: "DELETE" });
+  } catch (e) {}
+
+  loadSessions();
 }
 
 // Handle Form Submission
@@ -437,6 +533,23 @@ chatForm.addEventListener("submit", async (e) => {
 
   chatInput.value = "";
   appendMessage("user", q);
+
+  // Save user message to local cache
+  const localMsgs = getLocalMessages(currentSessionId);
+  localMsgs.push({ role: "user", content: q });
+  saveLocalMessages(currentSessionId, localMsgs);
+
+  // Update session snippet & timestamp in local sessions
+  const localSessions = getLocalSessions();
+  const sess = localSessions.find(s => s.session_id === currentSessionId);
+  if (sess) {
+    sess.last_message = q;
+    sess.updated_at = new Date().toISOString();
+    if (sess.title === "New Conversation") {
+      sess.title = q.slice(0, 32) + (q.length > 32 ? "..." : "");
+    }
+    saveLocalSessions(localSessions);
+  }
 
   // Temporary thinking bubble
   const thinkWrapper = document.createElement("div");
@@ -468,6 +581,22 @@ chatForm.addEventListener("submit", async (e) => {
     if (tb) tb.remove();
 
     appendMessage("assistant", data.response, data.evidence_trail, data.evaluation);
+
+    // Save assistant message to local cache
+    localMsgs.push({
+      role: "assistant",
+      content: data.response,
+      evidence: data.evidence_trail,
+      eval_scores: data.evaluation
+    });
+    saveLocalMessages(currentSessionId, localMsgs);
+
+    if (sess) {
+      sess.last_message = (data.response || "").slice(0, 50);
+      sess.updated_at = new Date().toISOString();
+      saveLocalSessions(localSessions);
+    }
+
     loadSessions();
     loadMetrics();
   } catch (err) {

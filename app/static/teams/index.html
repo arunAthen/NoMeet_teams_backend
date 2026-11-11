@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NoMeet — Operations Cockpit</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://res.cdn.office.net/teams-js/2.19.0/js/MicrosoftTeams.min.js"></script>
+</head>
+<body class="theme-default">
+  <div class="cockpit-layout">
+    
+    <!-- LEFT SIDEBAR: CHAT SESSIONS (Like M365 Agent) -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="brand-row">
+          <span class="brand-icon">📅</span>
+          <h3>NoMeet</h3>
+        </div>
+
+        <!-- Dynamic Group/Project Workspace Selector -->
+        <div class="workspace-picker">
+          <label class="picker-label" for="groupSelector">WORKSPACE / GROUP</label>
+          <div class="select-wrapper">
+            <select id="groupSelector" class="group-select">
+              <option value="all">🌐 All Workspaces</option>
+            </select>
+          </div>
+        </div>
+
+        <button id="newSessionBtn" class="btn-new-session">+ New Session</button>
+      </div>
+
+      <div class="sessions-label">PAST SESSIONS</div>
+      <div class="sessions-list" id="sessionsList">
+        <!-- Rendered dynamically by app.js -->
+        <div class="session-item active">
+          <span class="session-title">Current Session</span>
+        </div>
+      </div>
+
+      <div class="sidebar-footer">
+        <div class="sync-status">
+          <span class="status-dot"></span>
+          <span>Live Teams Sync Active</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- MAIN CHAT & METRICS VIEW -->
+    <main class="main-content">
+      
+      <!-- Top Overview Bar -->
+      <header class="top-bar">
+        <div class="workspace-pill" id="activeWorkspacePill">
+          <span class="workspace-dot"></span>
+          <span id="activeWorkspaceName">All Workspaces</span>
+        </div>
+        <div class="metric-pill">
+          <span class="pill-title">Change Requests</span>
+          <strong id="crMetric">--</strong>
+        </div>
+        <div class="metric-pill">
+          <span class="pill-title">Active Defects</span>
+          <strong id="bugMetric">--</strong>
+        </div>
+        <div class="metric-pill">
+          <span class="pill-title">Live Communications</span>
+          <strong id="msgMetric">--</strong>
+        </div>
+        <div class="metric-pill">
+          <span class="pill-title">Verified Specs</span>
+          <strong id="specMetric">--</strong>
+        </div>
+      </header>
+
+      <!-- Chat Stream Area -->
+      <section class="chat-viewport" id="chatViewport">
+        <!-- Messages rendered dynamically -->
+      </section>
+
+      <!-- Quick Suggestion Chips -->
+      <div class="suggestion-chips">
+        <button class="chip" data-query="how many cr has been raised and how many cr has been implemented">📊 How many CRs implemented?</button>
+        <button class="chip" data-query="what are the top open blockers in teams">🚨 What are top open blockers?</button>
+        <button class="chip" data-query="where is the view action plan option in CX tab">📍 Where is View Action Plan?</button>
+      </div>
+
+      <!-- Bottom Chat Input -->
+      <footer class="input-container">
+        <form id="chatForm" class="chat-form">
+          <input type="text" id="chatInput" placeholder="Ask about tasks, bugs, CR status, or UI button locations..." autocomplete="off" required />
+          <button type="submit" id="sendBtn">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+          </button>
+        </form>
+      </footer>
+
+    </main>
+
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 def _find_repo_root(p: Path) -> Path:
     for parent in [p] + list(p.parents):
-        if (parent / "requirements.txt").exists() or (parent / "vercel.json").exists() or (parent / ".git").exists():
+        if (parent / "requirements.txt").exists() or (parent / "vercel.json").exists() or (parent / "pyproject.toml").exists() or (parent / ".git").exists():
             return parent
     return p.parents[2]
 
@@ -15,7 +15,7 @@ env_file = BASE_DIR / ".env"
 if env_file.exists():
     load_dotenv(env_file, override=True)
 
-is_vercel = os.getenv("VERCEL") == "1" or os.getenv("VERCEL_ENV") is not None
+is_vercel = os.getenv("VERCEL") == "1" or os.getenv("VERCEL_ENV") is not None or Path("/var/task").exists()
 
 class Settings(BaseModel):
     PROJECT_NAME: str = "Teams 365 Delivery Intelligence Agent"

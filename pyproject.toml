@@ -1,12 +1,12 @@
 [project]
-name = "teams-365-agent"
+name = "nomeet-teams-backend"
 version = "1.0.0"
-description = "Enterprise Microsoft Teams Delivery Intelligence Agent with dynamic folder ingestion, live edit synchronization, and 1:1 private bot assistance."
+description = "Enterprise Microsoft Teams Delivery Intelligence Agent"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.110.0",
-    "uvicorn[standard]>=0.28.0",
+    "uvicorn>=0.28.0",
     "sqlmodel>=0.0.16",
     "pydantic>=2.6.0",
     "python-dotenv>=1.0.0",
@@ -14,12 +14,11 @@ dependencies = [
     "openpyxl>=3.1.2",
     "python-docx>=1.1.0",
     "beautifulsoup4>=4.12.3",
-    "langchain-core>=0.1.30",
-    "langchain-groq>=0.1.1",
-    "langchain-google-genai>=1.0.1",
-    "pillow>=10.2.0"
+    "aiofiles>=23.2.1"
 ]
+
+[tool.vercel]
+entrypoint = "app.main:app"
 
 [tool.uv]
 package = false
-

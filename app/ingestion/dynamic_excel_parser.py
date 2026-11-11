@@ -1,7 +1,7 @@
 import os
 import re
 from datetime import datetime, date
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import openpyxl
 
 ALIAS_TITLE = ["task", "description", "summary", "title", "requirement", "work item", "workitem", "defect", "topic", "query"]

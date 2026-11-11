@@ -116,3 +116,4 @@ In **Microsoft Entra ID (Azure Portal)**:
    - `Chat.Read.WhereInstalled` (To read messages from chats where the app is added)
 3. Grant **Admin Consent** for your tenant.
 4. Under **Certificates & Secrets**, generate a new client secret and copy its value to `AZURE_CLIENT_SECRET`.
+

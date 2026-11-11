@@ -57,7 +57,11 @@ static_candidates = [
 ]
 tab_dir = next((c for c in static_candidates if (c / "index.html").exists()), None)
 if tab_dir and tab_dir.exists():
-    app.mount("/teams/tab", StaticFiles(directory=str(tab_dir), html=True), name="teams_tab")
+    try:
+        from fastapi.staticfiles import StaticFiles
+        app.mount("/teams/tab", StaticFiles(directory=str(tab_dir), html=True), name="teams_tab")
+    except Exception as e:
+        print(f"[StaticFiles Mount Warning]: {e}")
 
 @app.on_event("startup")
 def on_startup():

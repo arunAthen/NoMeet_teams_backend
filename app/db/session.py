@@ -26,6 +26,7 @@ engine = create_engine(
 def init_db():
     # Configure SQLite pragmas safely
     try:
+        DB_FILE.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(DB_FILE) as conn:
             try:
                 conn.execute("PRAGMA journal_mode=WAL;")
@@ -36,22 +37,25 @@ def init_db():
             conn.commit()
 
             # Virtual FTS5 tables for sub-millisecond BM25 search
-            conn.execute("""
-                CREATE VIRTUAL TABLE IF NOT EXISTS specs_fts USING fts5(
-                    doc_title, category, content, tokenize='porter unicode61'
-                );
-            """)
-            conn.execute("""
-                CREATE VIRTUAL TABLE IF NOT EXISTS teams_fts USING fts5(
-                    message_id UNINDEXED, sender, timestamp UNINDEXED, content, tokenize='porter unicode61'
-                );
-            """)
-            conn.execute("""
-                CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(
-                    ticket_id UNINDEXED, title, description, assignee, status, module, tokenize='porter unicode61'
-                );
-            """)
-            conn.commit()
+            try:
+                conn.execute("""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS specs_fts USING fts5(
+                        doc_title, category, content, tokenize='porter unicode61'
+                    );
+                """)
+                conn.execute("""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS teams_fts USING fts5(
+                        message_id UNINDEXED, sender, timestamp UNINDEXED, content, tokenize='porter unicode61'
+                    );
+                """)
+                conn.execute("""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(
+                        ticket_id UNINDEXED, title, description, assignee, status, module, tokenize='porter unicode61'
+                    );
+                """)
+                conn.commit()
+            except Exception as fts_err:
+                print(f"[FTS5 Init Warning]: {fts_err}")
 
         # Create relational tables
         from app.db.schema import ProjectItem, TeamsMessage, ChatSession, ChatMessage, DataSource, AuditEvent

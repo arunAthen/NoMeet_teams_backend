@@ -13,6 +13,11 @@ const chatInput = document.getElementById("chatInput");
 // Initialize Microsoft Teams JS SDK
 if (window.microsoftTeams) {
   microsoftTeams.app.initialize().then(() => {
+    try {
+      microsoftTeams.app.notifySuccess();
+    } catch (e) {
+      console.log("Teams notifySuccess:", e);
+    }
     microsoftTeams.app.getContext().then((context) => {
       if (context.app && context.app.theme) {
         document.body.className = context.app.theme === "dark" ? "theme-dark" : "theme-default";

@@ -56,6 +56,14 @@ static_candidates = [
     settings.BASE_DIR / "frontend",
 ]
 tab_dir = next((c for c in static_candidates if (c / "index.html").exists()), None)
+
+@app.get("/teams/tab")
+def serve_teams_tab_root():
+    from fastapi.responses import FileResponse
+    if tab_dir and (tab_dir / "index.html").exists():
+        return FileResponse(tab_dir / "index.html")
+    return {"status": "tab_not_found"}
+
 if tab_dir and tab_dir.exists():
     try:
         from fastapi.staticfiles import StaticFiles

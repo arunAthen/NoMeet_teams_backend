@@ -10,6 +10,7 @@ from app.core.config import settings
 from app.integrations.teams.bot_adapter import handle_teams_bot_activity
 from app.integrations.teams.webhook_listener import handle_graph_chat_webhook
 from app.integrations.teams.graph_delta_sync import sync_sharepoint_files_delta
+from app.integrations.teams.graph_client import get_azure_token_diagnostics
 from app.agents.delivery_agent import run_agent_query
 
 router = APIRouter()
@@ -350,3 +351,8 @@ async def get_project_overview(group_id: Optional[str] = None):
         "indexed_specifications": total_specs,
         "status": "synchronized"
     }
+
+@router.get("/azure/status")
+async def check_azure_status():
+    """Diagnoses Microsoft Entra ID and Graph API connectivity using configured credentials."""
+    return await get_azure_token_diagnostics()

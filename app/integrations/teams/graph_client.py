@@ -66,3 +66,4 @@ async def get_azure_token_diagnostics() -> Dict[str, Any]:
             "authenticated": False,
             "error": str(e)
         }
+

@@ -10,7 +10,7 @@ from app.core.config import settings
 from app.integrations.teams.bot_adapter import handle_teams_bot_activity
 from app.integrations.teams.webhook_listener import handle_graph_chat_webhook
 from app.integrations.teams.graph_delta_sync import sync_sharepoint_files_delta
-from app.integrations.teams.graph_client import get_azure_token_diagnostics
+from app.integrations.teams.graph_client import get_azure_token_diagnostics, sync_live_chat_messages
 from app.agents.delivery_agent import run_agent_query
 
 router = APIRouter()
@@ -306,10 +306,22 @@ async def teams_graph_change_webhook(request: Request):
     return result
 
 @router.post("/sync/trigger")
-async def trigger_manual_sync():
-    """Triggers recursive crawl and sync over project files and Excel sheets."""
+async def trigger_manual_sync(group_id: Optional[str] = None):
+    """Triggers recursive crawl and sync over project files and live Teams chat messages."""
     stats = sync_sharepoint_files_delta()
-    return {"status": "completed", "stats": stats}
+    target_chat = group_id or (settings.AUTHORIZED_GROUP_CHAT_IDS[0] if settings.AUTHORIZED_GROUP_CHAT_IDS else None)
+    chat_sync_res = None
+    if target_chat:
+        chat_sync_res = await sync_live_chat_messages(target_chat)
+    return {"status": "completed", "file_stats": stats, "chat_sync": chat_sync_res}
+
+@router.post("/sync/chat")
+async def trigger_chat_sync(req: Dict[str, Any]):
+    """Syncs live messages for a specific chat from Microsoft Graph."""
+    chat_id = req.get("chat_id") or (settings.AUTHORIZED_GROUP_CHAT_IDS[0] if settings.AUTHORIZED_GROUP_CHAT_IDS else None)
+    if not chat_id:
+        return {"status": "error", "message": "No chat_id provided or configured."}
+    return await sync_live_chat_messages(chat_id)
 
 @router.get("/overview")
 async def get_project_overview(group_id: Optional[str] = None):

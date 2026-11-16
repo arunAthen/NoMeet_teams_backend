@@ -276,6 +276,18 @@ async def execute_query(req: QueryRequest):
             c.execute("UPDATE chat_sessions SET updated_at = ? WHERE session_id = ?", (now, session_id))
             conn.commit()
 
+    # Automatically fetch live chat messages if not yet loaded in database
+    try:
+        target_chat = gid if (gid and gid != "all") else (settings.AUTHORIZED_GROUP_CHAT_IDS[0] if settings.AUTHORIZED_GROUP_CHAT_IDS else None)
+        if target_chat and settings.AZURE_CLIENT_ID:
+            with sqlite3.connect(DB_FILE) as conn:
+                c = conn.cursor()
+                c.execute("SELECT COUNT(*) FROM teams_messages")
+                if c.fetchone()[0] == 0:
+                    await sync_live_chat_messages(target_chat)
+    except Exception as e:
+        pass
+
     res = run_agent_query(user_query=req.query, session_id=session_id, user_name=uname, group_id=gid)
     return res
 

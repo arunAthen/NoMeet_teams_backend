@@ -134,8 +134,14 @@ async def sync_live_chat_messages(chat_id: str) -> Dict[str, Any]:
                 if topic_data.get("topic"):
                     clean_name = topic_data.get("topic")
 
-            # 2. Fetch Chat Messages from Graph
-            msgs_url = f"https://graph.microsoft.com/v1.0/chats/{clean_chat_id}/messages?$top=50"
+            # 2. Fetch Chat / Channel Messages from Graph
+            if "thread.tacv2" in clean_chat_id:
+                # Team Channel message endpoint
+                msgs_url = f"https://graph.microsoft.com/v1.0/chats/{clean_chat_id}/messages?$top=50"
+            else:
+                # Group Chat message endpoint
+                msgs_url = f"https://graph.microsoft.com/v1.0/chats/{clean_chat_id}/messages?$top=50"
+
             msgs_resp = await client.get(msgs_url, headers=graph_headers)
 
             if msgs_resp.status_code != 200:
@@ -143,7 +149,7 @@ async def sync_live_chat_messages(chat_id: str) -> Dict[str, Any]:
                     "status": "graph_error",
                     "status_code": msgs_resp.status_code,
                     "details": msgs_resp.json(),
-                    "admin_consent_hint": "Admin consent for 'Chat.Read.All' is required in Azure Portal."
+                    "admin_consent_hint": "Admin consent for 'Chat.Read.All' / 'ChannelMessage.Read.All' is required in Azure Portal."
                 }
 
             messages_data = msgs_resp.json().get("value", [])
@@ -177,6 +183,13 @@ async def sync_live_chat_messages(chat_id: str) -> Dict[str, Any]:
                             INSERT OR IGNORE INTO teams_messages (project_id, message_id, thread_id, sender_name, timestamp, content, is_technical_signal)
                             VALUES (?, ?, ?, ?, ?, ?, 1)
                         """, (clean_chat_id, msg_id, clean_chat_id, sender, created_time, clean_content))
+                        try:
+                            c.execute("""
+                                INSERT INTO teams_fts (message_id, sender, timestamp, content)
+                                VALUES (?, ?, ?, ?)
+                            """, (msg_id, sender, created_time, clean_content))
+                        except Exception:
+                            pass
                         synced_count += 1
                 conn.commit()
 

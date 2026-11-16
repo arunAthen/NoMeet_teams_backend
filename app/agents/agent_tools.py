@@ -62,6 +62,16 @@ def search_project_records(keywords: str, limit: int = 5) -> str:
             except Exception:
                 pass
 
+            # Direct fallback search on teams_messages table
+            if not any(r["type"] == "teams" for r in results):
+                try:
+                    for t in terms[:2]:
+                        c.execute("SELECT sender_name, timestamp, content FROM teams_messages WHERE content LIKE ? LIMIT ?", (f"%{t}%", limit))
+                        for r in c.fetchall():
+                            results.append({"type": "teams", "citation": f"[Teams: {r[0]} @ {r[1][:10]}]", "text": r[2][:250]})
+                except Exception:
+                    pass
+
         return json.dumps({"total": len(results), "records": results[:limit]})
     except Exception as e:
         return json.dumps({"error": f"Search error: {str(e)}"})

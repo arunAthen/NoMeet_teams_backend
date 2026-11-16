@@ -1,119 +1,120 @@
 # NoMeet Teams Backend ⚡
-> Autonomous Delivery & Operations Intelligence API for Microsoft Teams (FastAPI + Microsoft Graph + LLM Copilot)
+> Autonomous Delivery & Operations Intelligence API for Microsoft Teams (FastAPI + Microsoft Graph + ReAct Copilot)
 
-`NoMeet` replaces synchronous delivery meetings with an autonomous agent that ingests SharePoint files, crawls group chat messages, tracks Change Requests (CRs) and bugs, and responds to delivery questions with grounded citations.
+[![Production Status](https://img.shields.io/badge/Status-Live%20Production-success)](https://no-meet-teams-backend.vercel.app/health)
+[![Vercel Deployment](https://img.shields.io/badge/Deployed%20on-Vercel-black)](https://no-meet-teams-backend.vercel.app)
+[![API Version](https://img.shields.io/badge/Version-1.0.0-blue)](https://no-meet-teams-backend.vercel.app/docs)
+
+`NoMeet` replaces synchronous delivery status meetings with an autonomous agent that ingests SharePoint files, crawls group chat messages, tracks Change Requests (CRs) and bugs, and responds to delivery questions with verifiable citations.
+
+---
+
+## 🌐 Live Production Endpoints
+
+| Resource | URL | Description |
+|---|---|---|
+| **Health Check** | `https://no-meet-teams-backend.vercel.app/health` | SQLite database & API health verification |
+| **Azure Status Diagnostic** | `https://no-meet-teams-backend.vercel.app/api/v1/teams/azure/status` | Live Entra ID token & Graph API permission status |
+| **Interactive API Docs** | `https://no-meet-teams-backend.vercel.app/docs` | Swagger UI documentation |
+| **Teams Personal Tab** | `https://no-meet-teams-backend.vercel.app/teams/tab/index.html` | Teams Cockpit Web interface |
 
 ---
 
 ## 📁 Repository Structure
+
 ```
 NoMeet_teams_backend/
 ├── app/
-│   ├── main.py                     # FastAPI application entrypoint & middleware
+│   ├── main.py                     # FastAPI application entrypoint & security middleware
 │   ├── agents/
-│   │   ├── delivery_agent.py       # LLM Delivery Copilot reasoning engine
-│   │   ├── agent_tools.py          # Database & Graph retrieval tools
-│   │   └── evaluator.py            # Answer evaluation & groundedness scoring
+│   │   ├── delivery_agent.py       # Multi-tier ReAct delivery copilot reasoning engine
+│   │   ├── agent_tools.py          # SQL & SQLite FTS5 BM25 retrieval tools
+│   │   └── evaluator.py            # Groundedness & faithfulness mathematical scoring
 │   ├── api/v1/
-│   │   └── teams_routes.py         # REST endpoints for CRs, bugs, groups, chat
+│   │   └── teams_routes.py         # REST endpoints for CRs, bugs, groups, chat, sync
 │   ├── core/
-│   │   ├── config.py               # Dynamic settings & environment loader
-│   │   └── security_headers.py     # Microsoft Teams iframe security middleware
+│   │   ├── config.py               # Settings & environment configuration loader
+│   │   └── security_headers.py     # Microsoft Teams iframe security middleware (CSP)
 │   ├── db/
-│   │   ├── schema.py               # SQLModel database models
-│   │   └── session.py              # SQLite session (with /tmp serverless fallback)
+│   │   ├── schema.py               # SQLModel database models & SQLite tables
+│   │   └── session.py              # SQLite session (with /tmp serverless migration)
 │   ├── ingestion/
-│   │   ├── dynamic_crawler.py      # Live Teams chat crawler
-│   │   ├── dynamic_excel_parser.py # Excel CR/Bug parser
-│   │   ├── docx_spec_parser.py     # Word spec & CR parser
-│   │   └── teams_chat_chunker.py   # Chat message tokenizer & chunker
+│   │   ├── dynamic_crawler.py      # Recursive folder crawler & ingestion orchestrator
+│   │   ├── dynamic_excel_parser.py # Intelligent Excel CR & bug tracker parser
+│   │   └── docx_parser.py          # Specification Word docx parser
 │   ├── integrations/teams/
-│   │   ├── graph_delta_sync.py     # Microsoft Graph SharePoint file delta sync
-│   │   ├── adaptive_cards.py       # Rich Teams Adaptive Cards
-│   │   ├── bot_adapter.py          # Bot Framework adapter
-│   │   └── webhook_listener.py     # Webhook listener
-│   └── static/teams/               # Bundled Teams Tab fallback
+│   │   ├── graph_client.py         # Live Microsoft Graph API client & token diagnostics
+│   │   ├── graph_delta_sync.py     # SharePoint file delta synchronization
+│   │   ├── bot_adapter.py          # Microsoft Bot Framework activity adapter
+│   │   ├── webhook_listener.py     # Graph change notification webhook listener
+│   │   └── adaptive_cards.py       # Microsoft Teams Adaptive Cards generator
+│   └── static/teams/               # Bundled Teams Tab web application
 ├── api/
 │   └── index.py                    # Vercel Serverless function entrypoint
-├── data/
-│   └── files_sync/                 # SharePoint sync directory (.gitkeep)
-├── vercel.json                     # Vercel serverless configuration
-├── requirements.txt                # Python dependencies
-├── run_server.py                   # Local development server runner
-├── Dockerfile                      # Production container configuration
-├── pyproject.toml                  # Project metadata
+├── pyproject.toml                  # Python package configuration & dependencies
+├── requirements.txt                # Pinned pip requirements
+├── vercel.json                     # Vercel deployment configuration
 ├── .env.example                    # Environment variables template
-├── .gitignore                      # Git ignore rules
-└── README.md                       # Backend documentation
+└── README.md                       # Backend technical documentation
 ```
 
 ---
 
-## 🚀 Quick Start (Local Development)
+## ⚙️ Environment Variables Specification
+
+The backend reads configuration from environment variables (or `.env` in local development):
+
+| Variable | Required | Description |
+|---|---|---|
+| `GROQ_API_KEY` | Recommended | Groq API Key for Tier 1 LPU inference (`llama-3.3-70b-versatile`) |
+| `GOOGLE_API_KEY` | Optional | Google Gemini API Key for Tier 2 fallback inference (`gemini-1.5-flash`) |
+| `AZURE_CLIENT_ID` | Required for Live Sync | Azure Entra ID Application (Client) ID |
+| `AZURE_CLIENT_SECRET`| Required for Live Sync | Azure Entra ID Client Secret Value |
+| `AZURE_TENANT_ID` | Required for Live Sync | Azure Entra ID Directory (Tenant) ID |
+| `AUTHORIZED_GROUP_CHAT_IDS` | Optional | Comma-separated list of Microsoft Teams Group Chat IDs |
+| `PUBLIC_BASE_URL` | Optional | Public base URL for webhook callbacks |
+
+---
+
+## 🚀 Local Development Setup
 
 ### 1. Prerequisites
 - Python 3.10+ installed
 
-### 2. Setup Environment
+### 2. Install Dependencies
 ```bash
-# Create virtual environment
+# Windows
 python -m venv .venv
-
-# Activate virtual environment
-# Windows:
 .venv\Scripts\activate
-# Linux/macOS:
-source .venv/bin/activate
+pip install -r requirements.txt
 
-# Install dependencies
+# Linux / macOS
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. Configure `.env`
-Copy `.env.example` to `.env` and fill in your keys:
+### 3. Configure Local Environment
 ```bash
 cp .env.example .env
+# Edit .env with your credentials
 ```
-Key variables:
-- `GROQ_API_KEY`: Groq API key for Llama 3.3 70B
-- `AZURE_CLIENT_ID`: Azure Entra ID App Client ID
-- `AZURE_CLIENT_SECRET`: Azure Entra ID App Client Secret
-- `AZURE_TENANT_ID`: Azure Entra ID Tenant ID
-- `AUTHORIZED_GROUP_CHAT_IDS`: Comma-separated list of Microsoft Teams Group Chat IDs
 
-### 4. Start the Server
+### 4. Run Development Server
 ```bash
-python run_server.py
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
-- API Root: `http://localhost:8000/`
-- Healthcheck: `http://localhost:8000/health`
-- Interactive Swagger Docs: `http://localhost:8000/docs`
-- Teams Personal Tab: `http://localhost:8000/teams/tab`
+Access Swagger UI at `http://localhost:8000/docs`.
 
 ---
 
-## ☁️ Deploying to Vercel
+## 🛡️ Enterprise Security & Microsoft Graph Permissions
 
-1. Push this repository to GitHub as **`NoMeet_teams_backend`**.
-2. Go to [vercel.com](https://vercel.com) and click **Add New Project**.
-3. Import the `NoMeet_teams_backend` GitHub repository.
-4. In the **Environment Variables** section, add:
-   - `GROQ_API_KEY`
-   - `AZURE_CLIENT_ID`
-   - `AZURE_CLIENT_SECRET`
-   - `AZURE_TENANT_ID`
-   - `AUTHORIZED_GROUP_CHAT_IDS`
-5. Click **Deploy**. Vercel will build serverless handlers from `api/index.py` using `vercel.json`.
+For live Microsoft Teams chat message and SharePoint file ingestion, configure the following **Application Permissions** in **Azure Portal (Microsoft Entra ID -> App Registrations)**:
 
----
+1. `Chat.Read.All` (Application): To read group chat messages and technical discussions.
+2. `ChannelMessage.Read.All` (Application): To index team channel conversations.
+3. `Files.Read.All` (Application): To read project tracking Excel sheets and spec files.
+4. `Sites.Read.All` (Application): To access SharePoint document libraries.
 
-## 🛡️ Azure App Registration Setup
-
-In **Microsoft Entra ID (Azure Portal)**:
-1. Register a new application: `NoMeet Teams Agent`.
-2. Under **API Permissions**, add the following **Application** permissions for Microsoft Graph:
-   - `Files.Read.All` (To autonomously index SharePoint delivery specs and sheets)
-   - `Chat.Read.WhereInstalled` (To read messages from chats where the app is added)
-3. Grant **Admin Consent** for your tenant.
-4. Under **Certificates & Secrets**, generate a new client secret and copy its value to `AZURE_CLIENT_SECRET`.
-
+> ⚠️ **Admin Consent:** Application permissions require clicking **"Grant admin consent for [Organization]"** in the Azure Portal before Microsoft Graph endpoints become accessible. Test live status anytime via `/api/v1/teams/azure/status`.

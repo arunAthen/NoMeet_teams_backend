@@ -39,18 +39,31 @@ function updateUserUI() {
 updateUserUI();
 
 // Clean workspace title decoder
+const workspaceNameCache = {
+  "all": "All Workspaces",
+  "19:7bdcc4616332483b82e7488c4424ec23@thread.v2": "Intranet Solutions",
+  "19:2337de30cb834d059c344292c8377656@thread.v2": "AgentAI Bot",
+  "channel_athen_tech_solutions_general": "Athen Technology Solutions — General",
+  "channel_synergy_comms_approvers_general": "Synergy Comms Approvers — General"
+};
+
 function cleanWorkspaceLabel(id, rawName) {
-  if (rawName && !rawName.startsWith("19:") && !rawName.includes("@thread") && !rawName.startsWith("Chat 7BDCC")) {
+  if (!id || id === "all") return "All Workspaces";
+  const cleanId = decodeURIComponent(id).trim();
+  if (workspaceNameCache[cleanId]) return workspaceNameCache[cleanId];
+  if (rawName && !rawName.startsWith("19:") && !rawName.includes("@thread") && !rawName.startsWith("Chat ")) {
     try {
-      return decodeURIComponent(rawName);
+      const decoded = decodeURIComponent(rawName).trim();
+      workspaceNameCache[cleanId] = decoded;
+      return decoded;
     } catch (e) {
       return rawName;
     }
   }
-  const cleanId = decodeURIComponent(id || "");
-  if (cleanId.includes("7bdcc461") || (rawName && rawName.includes("7BDCC"))) {
-    return "Intranet Solutions";
-  }
+  if (cleanId.includes("7bdcc461")) return "Intranet Solutions";
+  if (cleanId.includes("2337de30")) return "AgentAI Bot";
+  if (cleanId.includes("athen_tech")) return "Athen Technology Solutions — General";
+  if (cleanId.includes("synergy")) return "Synergy Comms Approvers — General";
   if (cleanId.startsWith("19:") || cleanId.includes("@thread")) {
     const short = cleanId.split("@")[0].replace("19:", "").substring(0, 8);
     return `Chat ${short.toUpperCase()}`;
@@ -206,6 +219,7 @@ async function loadGroups() {
     groupSelector.innerHTML = '<option value="all">🌐 All Workspaces</option>';
     if (data.groups && data.groups.length > 0) {
       data.groups.forEach(g => {
+        workspaceNameCache[g.id] = g.name;
         const opt = document.createElement("option");
         opt.value = g.id;
         opt.innerText = `📁 ${g.name}`;
@@ -340,60 +354,15 @@ function appendMessage(role, content, evidence = [], evalScores = null) {
   chatViewport.scrollTop = chatViewport.scrollHeight;
 }
 
-// Workspace to Session Mapping (1 Workspace = 1 Persistent Chat Thread)
-function getSessionIdForWorkspace(groupId) {
-  const cleanId = (groupId || "all").replace(/[^a-zA-Z0-9]/g, "_").slice(-24);
-  const uid = (currentUserId || "user").slice(-8);
-  return `ws_${cleanId}_${uid}`;
-}
-
-function getOrCreateSessionForWorkspace(groupId) {
-  const sid = getSessionIdForWorkspace(groupId);
-  const localList = getLocalSessions();
-  let sess = localList.find(s => s.session_id === sid || s.project_id === groupId);
-  const now = new Date().toISOString();
+// Render clean welcome state for active workspace
+function renderWelcomeState() {
+  chatViewport.innerHTML = "";
   const greetingName = (currentUserName && currentUserName !== "Team Member") ? currentUserName : "there";
-  const label = cleanWorkspaceLabel(groupId);
-
-  if (!sess) {
-    sess = {
-      session_id: sid,
-      title: label,
-      project_id: groupId || "all",
-      project_name: label,
-      user_id: currentUserId,
-      user_name: currentUserName,
-      created_at: now,
-      updated_at: now,
-      last_message: "No messages yet"
-    };
-    const initialMsgs = [{
-      role: "assistant",
-      content: `Hello ${greetingName}! I am your personal NoMeet Delivery & Operations Copilot for ${label}. How can I assist you with this workspace's tasks, bugs, or specifications today?`
-    }];
-    saveLocalMessages(sid, initialMsgs);
-    localList.unshift(sess);
-    saveLocalSessions(localList);
-
-    // Register on server
-    try {
-      fetch(`${API_BASE}/api/v1/teams/sessions`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          session_id: sid,
-          title: label,
-          group_id: groupId,
-          user_id: currentUserId,
-          user_name: currentUserName
-        })
-      }).catch(() => {});
-    } catch (e) {}
-  }
-  return sess;
+  const label = cleanWorkspaceLabel(currentGroupId);
+  appendMessage("assistant", `Hello ${greetingName}! I am your personal NoMeet Delivery & Operations Copilot for **${label}**. How can I assist you with this workspace's tasks, bugs, or specifications today?`);
 }
 
-// Load Sessions List (All Workspaces Visible in Sidebar at All Times)
+// Load Sessions List (Only Real Conversations With User Messages Are Shown)
 async function loadSessions() {
   let serverSessions = [];
   try {
@@ -407,55 +376,55 @@ async function loadSessions() {
     console.warn("Server sessions fetch warning:", e);
   }
 
-  // Merge server sessions with local storage cache (dedup by project_id / session_id)
+  // Merge server sessions with local storage cache (dedup by session_id)
   const localList = getLocalSessions();
   const sessionMap = new Map();
   localList.forEach(s => {
-    const key = s.project_id || s.session_id;
-    sessionMap.set(key, s);
+    if (s.session_id) sessionMap.set(s.session_id, s);
   });
   if (Array.isArray(serverSessions)) {
     serverSessions.forEach(s => {
-      const key = s.project_id || s.session_id;
-      if (!sessionMap.has(key)) {
-        sessionMap.set(key, s);
-      } else {
-        const existing = sessionMap.get(key);
-        if (s.updated_at && (!existing.updated_at || new Date(s.updated_at) > new Date(existing.updated_at))) {
-          existing.updated_at = s.updated_at;
-          existing.last_message = s.last_message;
-        }
-      }
+      if (s.session_id) sessionMap.set(s.session_id, s);
     });
   }
 
-  // Ensure active workspace is in the list
-  const activeSess = getOrCreateSessionForWorkspace(currentGroupId);
-  sessionMap.set(currentGroupId || "all", activeSess);
+  // Purge any empty dummy sessions that have no messages
+  let validSessions = Array.from(sessionMap.values()).filter(s => {
+    return s.last_message && s.last_message !== "No messages yet";
+  });
+  saveLocalSessions(validSessions);
 
-  let mergedSessions = Array.from(sessionMap.values());
-  mergedSessions.sort((a, b) => new Date(b.updated_at || b.created_at || 0) - new Date(a.updated_at || a.created_at || 0));
-  saveLocalSessions(mergedSessions);
+  // Filter to active workspace if not "all"
+  let displayedSessions = validSessions;
+  if (currentGroupId && currentGroupId !== "all") {
+    displayedSessions = validSessions.filter(s => {
+      const sp = decodeURIComponent(s.project_id || "");
+      const cg = decodeURIComponent(currentGroupId);
+      return sp === cg || sp === "all" || sp.includes(cg.slice(0, 10));
+    });
+  }
+
+  displayedSessions.sort((a, b) => new Date(b.updated_at || b.created_at || 0) - new Date(a.updated_at || a.created_at || 0));
 
   sessionsList.innerHTML = "";
 
-  mergedSessions.forEach(s => {
+  if (displayedSessions.length === 0) {
+    const hint = document.createElement("div");
+    hint.className = "empty-sessions-hint";
+    hint.style.cssText = "padding: 24px 12px; color: #94a3b8; font-size: 11px; text-align: center; line-height: 1.5;";
+    hint.innerHTML = `No previous conversations in <strong>${cleanWorkspaceLabel(currentGroupId)}</strong>.<br/><span style="opacity: 0.7;">Type a question below to start chatting!</span>`;
+    sessionsList.appendChild(hint);
+    return;
+  }
+
+  displayedSessions.forEach(s => {
     const card = document.createElement("div");
-    const isActive = (s.session_id === currentSessionId) || (s.project_id === currentGroupId);
+    const isActive = (s.session_id === currentSessionId);
     card.className = `session-card ${isActive ? "active" : ""}`;
     card.dataset.sessionId = s.session_id;
-    card.dataset.projectId = s.project_id;
 
-    // Click card -> switches dropdown & loads that workspace's dedicated chat
     card.onclick = async () => {
-      if (s.project_id && s.project_id !== currentGroupId) {
-        currentGroupId = s.project_id;
-        if (groupSelector) groupSelector.value = currentGroupId;
-        updateWorkspaceLabel();
-        loadMetrics();
-      }
       await selectSession(s.session_id);
-      loadSessions();
     };
 
     // Card Header: Project Micro-Badge & Timestamp & Reset Action
@@ -478,7 +447,7 @@ async function loadSessions() {
     const delBtn = document.createElement("button");
     delBtn.className = "btn-del-session";
     delBtn.innerHTML = "🗑️";
-    delBtn.title = "Clear Conversation";
+    delBtn.title = "Delete Conversation";
     delBtn.onclick = (e) => {
       e.stopPropagation();
       deleteSession(s.session_id);
@@ -490,26 +459,21 @@ async function loadSessions() {
     header.appendChild(projTag);
     header.appendChild(metaRight);
 
-    // Card Title
+    // Card Title (The user query or topic)
     const title = document.createElement("div");
     title.className = "session-card-title";
-    title.innerText = s.title || cleanProj;
+    title.innerText = s.title || "Conversation";
 
     // Card Snippet
     const snippet = document.createElement("div");
     snippet.className = "session-card-snippet";
-    snippet.innerText = s.last_message || "No messages yet";
+    snippet.innerText = s.last_message || "";
 
     card.appendChild(header);
     card.appendChild(title);
     card.appendChild(snippet);
     sessionsList.appendChild(card);
   });
-
-  if (!currentSessionId) {
-    currentSessionId = activeSess.session_id;
-    selectSession(currentSessionId);
-  }
 }
 
 // Select Session & load messages
@@ -529,6 +493,8 @@ async function selectSession(sessionId) {
   const cachedMessages = getLocalMessages(sessionId);
   if (cachedMessages && cachedMessages.length > 0) {
     cachedMessages.forEach(m => appendMessage(m.role, m.content, m.evidence, m.eval_scores));
+  } else {
+    renderWelcomeState();
   }
 
   // Sync latest from backend
@@ -549,8 +515,10 @@ async function selectSession(sessionId) {
   }
 }
 
-// Reset / Clear Session
+// Delete / Clear Session
 async function deleteSession(sessionId) {
+  const localList = getLocalSessions().filter(s => s.session_id !== sessionId);
+  saveLocalSessions(localList);
   try {
     localStorage.removeItem(`nomeet_msgs_${sessionId}`);
   } catch (e) {}
@@ -559,24 +527,11 @@ async function deleteSession(sessionId) {
     fetch(`${API_BASE}/api/v1/teams/sessions/${sessionId}`, { method: "DELETE" });
   } catch (e) {}
 
-  // Reset local session messages with clean greeting
-  const localList = getLocalSessions();
-  const sess = localList.find(s => s.session_id === sessionId);
-  if (sess) {
-    const greetingName = (currentUserName && currentUserName !== "Team Member") ? currentUserName : "there";
-    const label = cleanWorkspaceLabel(sess.project_id);
-    const initialMsgs = [{
-      role: "assistant",
-      content: `Hello ${greetingName}! I am your personal NoMeet Delivery & Operations Copilot for ${label}. How can I assist you with this workspace's tasks, bugs, or specifications today?`
-    }];
-    saveLocalMessages(sessionId, initialMsgs);
-    sess.last_message = "No messages yet";
-    sess.updated_at = new Date().toISOString();
-    saveLocalSessions(localList);
+  if (currentSessionId === sessionId) {
+    currentSessionId = null;
+    renderWelcomeState();
   }
-
-  await selectSession(sessionId);
-  await loadSessions();
+  loadSessions();
 }
 
 // Handle Form Submission
@@ -588,6 +543,10 @@ chatForm.addEventListener("submit", async (e) => {
   chatInput.value = "";
   appendMessage("user", q);
 
+  if (!currentSessionId) {
+    currentSessionId = "sess_" + Math.random().toString(36).substring(2, 12);
+  }
+
   // Save user message to local cache
   const localMsgs = getLocalMessages(currentSessionId);
   localMsgs.push({ role: "user", content: q });
@@ -595,15 +554,28 @@ chatForm.addEventListener("submit", async (e) => {
 
   // Update session snippet & timestamp in local sessions
   const localSessions = getLocalSessions();
-  const sess = localSessions.find(s => s.session_id === currentSessionId);
-  if (sess) {
+  let sess = localSessions.find(s => s.session_id === currentSessionId);
+  if (!sess) {
+    sess = {
+      session_id: currentSessionId,
+      title: q.slice(0, 32) + (q.length > 32 ? "..." : ""),
+      project_id: currentGroupId || "all",
+      project_name: cleanWorkspaceLabel(currentGroupId),
+      user_id: currentUserId,
+      user_name: currentUserName,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      last_message: q
+    };
+    localSessions.unshift(sess);
+  } else {
     sess.last_message = q;
     sess.updated_at = new Date().toISOString();
-    if (sess.title === "New Conversation") {
+    if (!sess.title || sess.title === "New Conversation" || sess.title.startsWith("Chat ")) {
       sess.title = q.slice(0, 32) + (q.length > 32 ? "..." : "");
     }
-    saveLocalSessions(localSessions);
   }
+  saveLocalSessions(localSessions);
 
   // Temporary thinking bubble
   const thinkWrapper = document.createElement("div");
@@ -670,9 +642,9 @@ document.querySelectorAll(".chip").forEach(chip => {
 
 if (newSessionBtn) {
   newSessionBtn.onclick = () => {
-    if (currentSessionId) {
-      deleteSession(currentSessionId);
-    }
+    currentSessionId = null;
+    renderWelcomeState();
+    document.querySelectorAll(".session-card").forEach(el => el.classList.remove("active"));
   };
 }
 
@@ -681,6 +653,8 @@ if (clearChatBtn) {
   clearChatBtn.onclick = () => {
     if (currentSessionId) {
       deleteSession(currentSessionId);
+    } else {
+      renderWelcomeState();
     }
   };
 }
@@ -689,4 +663,7 @@ if (clearChatBtn) {
 loadGroups().then(() => {
   loadMetrics();
   loadSessions();
+  if (!currentSessionId) {
+    renderWelcomeState();
+  }
 });

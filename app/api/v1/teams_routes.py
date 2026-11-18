@@ -41,11 +41,17 @@ class RegisterWorkspaceRequest(BaseModel):
 
 def _clean_workspace_name(raw_id: str, raw_name: Optional[str] = None) -> str:
     """Decodes URL encoding and converts raw thread IDs to clean, human-readable labels."""
-    if raw_name and raw_name.strip() and not raw_name.startswith("19:") and "@thread" not in raw_name and not raw_name.startswith("Chat 7BDCC"):
+    if raw_name and raw_name.strip() and not raw_name.startswith("19:") and "@thread" not in raw_name and not raw_name.startswith("Chat "):
         return unquote(raw_name).strip()
     clean_id = unquote(raw_id).strip()
     if "7bdcc461" in clean_id.lower() or (raw_name and "7bdcc" in raw_name.lower()):
         return "Intranet Solutions"
+    if "2337de30" in clean_id.lower() or (raw_name and "2337de30" in raw_name.lower()):
+        return "AgentAI Bot"
+    if "athen_tech" in clean_id.lower():
+        return "Athen Technology Solutions — General"
+    if "synergy" in clean_id.lower():
+        return "Synergy Comms Approvers — General"
     if clean_id.startswith("19:") or "@thread" in clean_id:
         short = clean_id.split("@")[0].replace("19:", "")[:8]
         return f"Chat {short.upper()}"
@@ -173,7 +179,7 @@ def list_chat_sessions(
             SELECT s.session_id, s.title, s.project_id, s.user_name, s.user_aad_id, s.created_at, s.updated_at,
                    (SELECT content FROM chat_messages WHERE session_id = s.session_id ORDER BY id DESC LIMIT 1) as last_msg
             FROM chat_sessions s
-            WHERE 1=1
+            WHERE (SELECT COUNT(*) FROM chat_messages WHERE session_id = s.session_id AND role = 'user') > 0
         """
         params = []
         if user_id:

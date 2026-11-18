@@ -155,15 +155,20 @@ async def discover_tenant_workspaces(user_id: Optional[str] = None) -> List[Dict
                             chat_type = ch.get("chatType")
                             topic = ch.get("topic")
                             if chat_type == "group" or topic:
-                                if not topic and "7bdcc" in cid.lower():
-                                    topic = "Intranet Solutions"
+                                if not topic:
+                                    if "7bdcc" in cid.lower():
+                                        topic = "Intranet Solutions"
+                                    elif "2337de30" in cid.lower():
+                                        topic = "AgentAI Bot"
                                 cname = topic or f"Chat {cid.split('@')[0].replace('19:', '')[:8].upper()}"
                                 discovered.append({"id": cid, "name": cname, "workspace_type": "chat"})
                                 with sqlite3.connect(DB_FILE) as conn:
                                     conn.execute("""
                                         INSERT INTO workspaces (id, name, workspace_type, last_active)
                                         VALUES (?, ?, 'chat', ?)
-                                        ON CONFLICT(id) DO UPDATE SET name = excluded.name, last_active = excluded.last_active
+                                        ON CONFLICT(id) DO UPDATE SET
+                                            name = CASE WHEN excluded.name NOT LIKE 'Chat %' THEN excluded.name ELSE workspaces.name END,
+                                            last_active = excluded.last_active
                                     """, (cid, cname, now))
                 except Exception as c_err:
                     logger.warning(f"User {cuid} chats notice: {c_err}")

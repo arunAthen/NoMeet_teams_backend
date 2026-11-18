@@ -309,24 +309,50 @@ body.theme-dark {
   position: absolute;
   top: 8px;
   right: 8px;
-  background: transparent;
-  border: none;
-  color: #64748b;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #94a3b8;
   cursor: pointer;
-  padding: 2px 5px;
+  padding: 3px 6px;
   font-size: 11px;
   border-radius: 4px;
-  opacity: 0;
+  opacity: 0.7;
   transition: all 0.2s;
 }
 
 .session-card:hover .btn-del-session {
   opacity: 1;
+  color: #ef4444;
+  border-color: rgba(239, 68, 68, 0.4);
+  background: rgba(239, 68, 68, 0.15);
 }
 
 .btn-del-session:hover {
   color: #ef4444;
-  background: rgba(239, 68, 68, 0.15);
+  background: rgba(239, 68, 68, 0.25);
+  border-color: #ef4444;
+}
+
+.btn-clear-chat {
+  margin-left: auto;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  color: var(--text-muted);
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  transition: all 0.2s;
+}
+
+.btn-clear-chat:hover {
+  color: #ef4444;
+  border-color: rgba(239, 68, 68, 0.4);
+  background: rgba(239, 68, 68, 0.1);
 }
 
 .sidebar-footer {

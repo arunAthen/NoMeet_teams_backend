@@ -97,7 +97,33 @@ def deterministic_grounded_answer(query: str, group_id: str = "all") -> str:
                     f"- All records sourced directly from verified Microsoft Teams chat messages."
                 )
 
-        # 4. General Keyword Search across Communications
+        # 4. Group Members / People inquiries
+        if any(w in q_low for w in ["people", "peoples", "member", "members", "who is in", "participants"]):
+            c.execute("SELECT content FROM teams_messages WHERE message_id LIKE 'roster_%' ORDER BY id DESC LIMIT 1")
+            roster_row = c.fetchone()
+            if roster_row and roster_row[0]:
+                return (
+                    f"### 🎯 Executive Ground Truth\n"
+                    f"{roster_row[0]}.\n\n"
+                    f"### ⚡ Verified Directory Status\n"
+                    f"- Sourced directly from verified Microsoft 365 Entra ID / Teams roster."
+                )
+            # Fallback to distinct senders
+            if group_id != "all":
+                c.execute("SELECT DISTINCT sender_name FROM teams_messages WHERE sender_name != 'System Roster' AND project_id = ?", (group_id,))
+            else:
+                c.execute("SELECT DISTINCT sender_name FROM teams_messages WHERE sender_name != 'System Roster'")
+            senders = [r[0] for r in c.fetchall() if r[0]]
+            if senders:
+                names_str = ", ".join(f"**{name}**" for name in senders)
+                return (
+                    f"### 🎯 Executive Ground Truth\n"
+                    f"Identified **{len(senders)} active participant(s)** in this workspace: {names_str}.\n\n"
+                    f"### ⚡ Verified Communication Signals\n"
+                    f"- Based on active message authors in workspace records."
+                )
+
+        # 5. General Keyword Search across Communications
         tokens = [w for w in re.findall(r'\b[a-zA-Z0-9_-]{3,}\b', q_low) if w not in {"how", "many", "took", "what", "when", "where", "which", "there", "have", "been", "with", "from", "that", "this", "tell", "about", "show"}]
         if tokens:
             like_clauses = " OR ".join(["lower(content) LIKE ?"] * len(tokens))
@@ -200,6 +226,33 @@ def run_agent_query(user_query: str, session_id: str = "default_session", user_n
                         continue  # Try next model candidate
                     else:
                         break
+
+                # Direct completion fallback if tool calling failed (e.g. 400 Bad Request)
+                if not final_content:
+                    retrieved_context = ""
+                    try:
+                        with sqlite3.connect(DB_FILE) as conn:
+                            conn.row_factory = sqlite3.Row
+                            c = conn.cursor()
+                            c.execute("SELECT sender_name, timestamp, content FROM teams_messages ORDER BY id DESC LIMIT 15")
+                            rows = c.fetchall()
+                            if rows:
+                                retrieved_context = "\n".join(f"- [{r['sender_name']} @ {r['timestamp'][:10]}]: {r['content']}" for r in rows)
+                    except Exception:
+                        pass
+
+                    direct_payload = {
+                        "model": "llama-3.1-8b-instant",
+                        "messages": [
+                            {"role": "system", "content": f"{scoped_system_prompt}\n\nWorkspace Context:\n{retrieved_context}"},
+                            {"role": "user", "content": user_query}
+                        ],
+                        "temperature": 0.1,
+                        "max_tokens": 1024
+                    }
+                    r_direct = client.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=direct_payload)
+                    if r_direct.status_code == 200:
+                        final_content = r_direct.json()["choices"][0]["message"].get("content")
         except Exception as e:
             print(f"[Tier 1 Groq REST Error]: {e}. Attempting fallback...")
 

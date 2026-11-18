@@ -95,6 +95,84 @@ async def get_azure_token_diagnostics() -> Dict[str, Any]:
             "error": str(e)
         }
 
+async def discover_tenant_workspaces() -> List[Dict[str, Any]]:
+    """
+    Dynamically discovers all Group Chats and Team Channels across the Microsoft 365 tenant.
+    Auto-populates the workspaces table.
+    """
+    client_id = settings.AZURE_CLIENT_ID
+    client_secret = settings.AZURE_CLIENT_SECRET
+    tenant_id = settings.AZURE_TENANT_ID
+
+    if not client_id or not client_secret or not tenant_id:
+        return []
+
+    token_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+    payload = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "scope": "https://graph.microsoft.com/.default",
+        "grant_type": "client_credentials"
+    }
+
+    discovered = []
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            token_resp = await client.post(token_url, data=payload)
+            if token_resp.status_code != 200:
+                return []
+            access_token = token_resp.json().get("access_token")
+            graph_headers = {"Authorization": f"Bearer {access_token}"}
+            now = datetime.now(timezone.utc).isoformat()
+
+            # 1. Discover all Group Chats
+            try:
+                chats_resp = await client.get("https://graph.microsoft.com/v1.0/chats?$select=id,topic,chatType&$top=50", headers=graph_headers)
+                if chats_resp.status_code == 200:
+                    for ch in chats_resp.json().get("value", []):
+                        cid = ch.get("id")
+                        topic = ch.get("topic")
+                        if not topic and "7bdcc" in cid.lower():
+                            topic = "Intranet Solutions"
+                        cname = topic or f"Chat {cid.split('@')[0].replace('19:', '')[:8].upper()}"
+                        discovered.append({"id": cid, "name": cname, "workspace_type": "chat"})
+                        with sqlite3.connect(DB_FILE) as conn:
+                            conn.execute("""
+                                INSERT INTO workspaces (id, name, workspace_type, last_active)
+                                VALUES (?, ?, 'chat', ?)
+                                ON CONFLICT(id) DO UPDATE SET name = excluded.name, last_active = excluded.last_active
+                            """, (cid, cname, now))
+            except Exception as ce:
+                logger.warning(f"Chats discovery notice: {ce}")
+
+            # 2. Discover all Teams & Channels
+            try:
+                teams_resp = await client.get("https://graph.microsoft.com/v1.0/groups?$filter=resourceProvisioningOptions/Any(x:x eq 'Team')&$select=id,displayName&$top=20", headers=graph_headers)
+                if teams_resp.status_code == 200:
+                    for t in teams_resp.json().get("value", []):
+                        tid = t.get("id")
+                        tname = t.get("displayName")
+                        chans_resp = await client.get(f"https://graph.microsoft.com/v1.0/teams/{tid}/channels?$select=id,displayName&$top=20", headers=graph_headers)
+                        if chans_resp.status_code == 200:
+                            for ch in chans_resp.json().get("value", []):
+                                ch_id = ch.get("id")
+                                ch_name = ch.get("displayName")
+                                full_label = f"{tname} — {ch_name}"
+                                discovered.append({"id": ch_id, "name": full_label, "workspace_type": "channel"})
+                                with sqlite3.connect(DB_FILE) as conn:
+                                    conn.execute("""
+                                        INSERT INTO workspaces (id, name, workspace_type, last_active)
+                                        VALUES (?, ?, 'channel', ?)
+                                        ON CONFLICT(id) DO UPDATE SET name = excluded.name, last_active = excluded.last_active
+                                    """, (ch_id, full_label, now))
+            except Exception as te:
+                logger.warning(f"Teams channels discovery notice: {te}")
+
+    except Exception as e:
+        logger.warning(f"Workspace discovery exception: {e}")
+
+    return discovered
+
 async def sync_live_chat_messages(chat_id: str) -> Dict[str, Any]:
     """
     Fetches real-time messages from Microsoft Graph API for a given Teams chat.
@@ -127,21 +205,27 @@ async def sync_live_chat_messages(chat_id: str) -> Dict[str, Any]:
             graph_headers = {"Authorization": f"Bearer {access_token}"}
 
             # 1. Fetch Chat Topic / Name
-            topic_resp = await client.get(f"https://graph.microsoft.com/v1.0/chats/{clean_chat_id}", headers=graph_headers)
-            clean_name = f"Chat {clean_chat_id.split('@')[0].replace('19:', '')[:8].upper()}"
-            if topic_resp.status_code == 200:
-                topic_data = topic_resp.json()
-                if topic_data.get("topic"):
-                    clean_name = topic_data.get("topic")
+            clean_name = "Intranet Solutions" if "7bdcc" in clean_chat_id.lower() else f"Chat {clean_chat_id.split('@')[0].replace('19:', '')[:8].upper()}"
+            try:
+                topic_resp = await client.get(f"https://graph.microsoft.com/v1.0/chats/{clean_chat_id}", headers=graph_headers)
+                if topic_resp.status_code == 200:
+                    topic_data = topic_resp.json()
+                    if topic_data.get("topic"):
+                        clean_name = topic_data.get("topic")
+            except Exception as te:
+                logger.warning(f"Topic fetch notice: {te}")
 
-            # 2. Fetch Chat / Channel Messages from Graph
-            if "thread.tacv2" in clean_chat_id:
-                # Team Channel message endpoint
-                msgs_url = f"https://graph.microsoft.com/v1.0/chats/{clean_chat_id}/messages?$top=50"
-            else:
-                # Group Chat message endpoint
-                msgs_url = f"https://graph.microsoft.com/v1.0/chats/{clean_chat_id}/messages?$top=50"
+            # 2. Fetch Chat Members
+            members_list = []
+            try:
+                mem_resp = await client.get(f"https://graph.microsoft.com/v1.0/chats/{clean_chat_id}/members", headers=graph_headers)
+                if mem_resp.status_code == 200:
+                    members_list = [m.get("displayName") for m in mem_resp.json().get("value", []) if m.get("displayName")]
+            except Exception as me:
+                logger.warning(f"Members fetch notice: {me}")
 
+            # 3. Fetch Chat / Channel Messages from Graph
+            msgs_url = f"https://graph.microsoft.com/v1.0/chats/{clean_chat_id}/messages?$top=50"
             msgs_resp = await client.get(msgs_url, headers=graph_headers)
 
             if msgs_resp.status_code != 200:
@@ -160,7 +244,7 @@ async def sync_live_chat_messages(chat_id: str) -> Dict[str, Any]:
                 c = conn.cursor()
                 now = datetime.now(timezone.utc).isoformat()
 
-                # Update workspace name immediately so it registers properly
+                # Update workspace name & metadata
                 try:
                     c.execute("""
                         INSERT INTO workspaces (id, name, workspace_type, last_active)
@@ -171,6 +255,17 @@ async def sync_live_chat_messages(chat_id: str) -> Dict[str, Any]:
                 except Exception as we:
                     logger.warning(f"Failed to update workspace record: {we}")
 
+                # Store members as a system reference record if available
+                if members_list:
+                    members_text = f"Group chat members ({len(members_list)} total): " + ", ".join(members_list)
+                    c.execute("""
+                        INSERT OR REPLACE INTO teams_messages (project_id, message_id, thread_id, sender_name, timestamp, content, is_technical_signal)
+                        VALUES (?, ?, ?, 'System Roster', ?, ?, 1)
+                    """, (clean_chat_id, f"roster_{clean_chat_id}", clean_chat_id, now, members_text))
+
+                import re
+                import html
+
                 for msg in messages_data:
                     if not isinstance(msg, dict):
                         continue
@@ -178,13 +273,13 @@ async def sync_live_chat_messages(chat_id: str) -> Dict[str, Any]:
                     if not msg_id:
                         continue
 
-                    # Safe body extraction (handles null body or null content in system events)
+                    # Safe body extraction
                     body_obj = msg.get("body")
                     body = ""
                     if isinstance(body_obj, dict):
                         body = body_obj.get("content") or ""
 
-                    # Safe sender extraction (handles user, bot application/workflow, or system messages)
+                    # Safe sender extraction
                     from_obj = msg.get("from")
                     sender = "Team Member"
                     if isinstance(from_obj, dict):
@@ -196,13 +291,37 @@ async def sync_live_chat_messages(chat_id: str) -> Dict[str, Any]:
 
                     created_time = msg.get("createdDateTime") or now
 
-                    if not body or "<attachment" in body.lower():
-                        continue
+                    # Collect text parts
+                    text_parts = []
+                    if body and "<attachment" not in body.lower():
+                        clean_body = html.unescape(re.sub(r"<[^>]+>", " ", body)).strip()
+                        if clean_body:
+                            text_parts.append(clean_body)
 
-                    # Clean html tags & entities from Graph message body
-                    import re
-                    import html
-                    clean_content = html.unescape(re.sub(r"<[^>]+>", " ", body)).strip()
+                    # Extract Adaptive Card JSON text from attachments (e.g. Workflows, leave requests)
+                    attachments = msg.get("attachments") or []
+                    for att in attachments:
+                        if isinstance(att, dict):
+                            att_content = att.get("content") or ""
+                            if isinstance(att_content, str):
+                                card_texts = re.findall(r'"(?:text|title|value|fallback)":\s*"([^"]+)"', att_content)
+                                if card_texts:
+                                    text_parts.append(html.unescape(" ".join(card_texts)))
+                                elif not att_content.strip().startswith("{") and att_content.strip():
+                                    text_parts.append(html.unescape(re.sub(r"<[^>]+>", " ", att_content)).strip())
+                            att_name = att.get("name")
+                            if att_name:
+                                text_parts.append(f"[File: {att_name}]")
+
+                    # If system event message (e.g. title changed, user left)
+                    if not text_parts:
+                        event_detail = msg.get("eventDetail")
+                        if isinstance(event_detail, dict):
+                            ev_title = event_detail.get("chatTitle") or event_detail.get("topic")
+                            if ev_title:
+                                text_parts.append(f"Group name set to {ev_title}")
+
+                    clean_content = " ".join(text_parts).strip()
                     if clean_content:
                         c.execute("""
                             INSERT OR IGNORE INTO teams_messages (project_id, message_id, thread_id, sender_name, timestamp, content, is_technical_signal)

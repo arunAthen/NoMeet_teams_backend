@@ -40,7 +40,7 @@ updateUserUI();
 
 // Clean workspace title decoder
 function cleanWorkspaceLabel(id, rawName) {
-  if (rawName && !rawName.startsWith("19:") && !rawName.includes("@thread")) {
+  if (rawName && !rawName.startsWith("19:") && !rawName.includes("@thread") && !rawName.startsWith("Chat 7BDCC")) {
     try {
       return decodeURIComponent(rawName);
     } catch (e) {
@@ -48,6 +48,9 @@ function cleanWorkspaceLabel(id, rawName) {
     }
   }
   const cleanId = decodeURIComponent(id || "");
+  if (cleanId.includes("7bdcc461") || (rawName && rawName.includes("7BDCC"))) {
+    return "Intranet Solutions";
+  }
   if (cleanId.startsWith("19:") || cleanId.includes("@thread")) {
     const short = cleanId.split("@")[0].replace("19:", "").substring(0, 8);
     return `Chat ${short.toUpperCase()}`;
@@ -375,8 +378,8 @@ async function loadSessions() {
 
     const projTag = document.createElement("span");
     projTag.className = "session-project-tag";
-    const cleanProj = s.project_name || cleanWorkspaceLabel(s.project_id);
-    projTag.innerText = `🏷️ ${cleanProj}`;
+    const cleanProj = cleanWorkspaceLabel(s.project_id, s.project_name);
+    projTag.innerText = (s.project_id === "all" || cleanProj === "All") ? "🌐 All Workspaces" : `📁 ${cleanProj}`;
 
     const timeSpan = document.createElement("span");
     timeSpan.className = "session-time";
@@ -398,7 +401,7 @@ async function loadSessions() {
     // Delete Button
     const delBtn = document.createElement("button");
     delBtn.className = "btn-del-session";
-    delBtn.innerHTML = "✕";
+    delBtn.innerHTML = "🗑️";
     delBtn.title = "Delete Conversation";
     delBtn.onclick = (e) => {
       e.stopPropagation();
@@ -442,8 +445,11 @@ async function selectSession(sessionId) {
     if (res.ok) {
       const data = await res.json();
       if (data.messages && data.messages.length > 0) {
-        chatViewport.innerHTML = "";
-        data.messages.forEach(m => appendMessage(m.role, m.content, m.evidence, m.eval_scores));
+        // Only re-render if message count or last message changed to prevent UI flicker
+        if (data.messages.length !== cachedMessages.length) {
+          chatViewport.innerHTML = "";
+          data.messages.forEach(m => appendMessage(m.role, m.content, m.evidence, m.eval_scores));
+        }
         saveLocalMessages(sessionId, data.messages);
       }
     }
@@ -615,6 +621,15 @@ document.querySelectorAll(".chip").forEach(chip => {
 });
 
 newSessionBtn.onclick = createNewSession;
+
+const clearChatBtn = document.getElementById("clearChatBtn");
+if (clearChatBtn) {
+  clearChatBtn.onclick = () => {
+    if (currentSessionId) {
+      deleteSession(currentSessionId);
+    }
+  };
+}
 
 // Init sequence
 loadGroups().then(() => {

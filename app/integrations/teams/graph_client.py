@@ -125,9 +125,9 @@ async def discover_tenant_workspaces() -> List[Dict[str, Any]]:
             graph_headers = {"Authorization": f"Bearer {access_token}"}
             now = datetime.now(timezone.utc).isoformat()
 
-            # 1. Discover all Group Chats
+            # 1. Discover all Group Chats (No $select to avoid 400 Bad Request)
             try:
-                chats_resp = await client.get("https://graph.microsoft.com/v1.0/chats?$select=id,topic,chatType&$top=50", headers=graph_headers)
+                chats_resp = await client.get("https://graph.microsoft.com/v1.0/chats?$top=50", headers=graph_headers)
                 if chats_resp.status_code == 200:
                     for ch in chats_resp.json().get("value", []):
                         cid = ch.get("id")
@@ -145,28 +145,9 @@ async def discover_tenant_workspaces() -> List[Dict[str, Any]]:
             except Exception as ce:
                 logger.warning(f"Chats discovery notice: {ce}")
 
-            # 2. Discover all Teams & Channels
-            try:
-                teams_resp = await client.get("https://graph.microsoft.com/v1.0/groups?$filter=resourceProvisioningOptions/Any(x:x eq 'Team')&$select=id,displayName&$top=20", headers=graph_headers)
-                if teams_resp.status_code == 200:
-                    for t in teams_resp.json().get("value", []):
-                        tid = t.get("id")
-                        tname = t.get("displayName")
-                        chans_resp = await client.get(f"https://graph.microsoft.com/v1.0/teams/{tid}/channels?$select=id,displayName&$top=20", headers=graph_headers)
-                        if chans_resp.status_code == 200:
-                            for ch in chans_resp.json().get("value", []):
-                                ch_id = ch.get("id")
-                                ch_name = ch.get("displayName")
-                                full_label = f"{tname} — {ch_name}"
-                                discovered.append({"id": ch_id, "name": full_label, "workspace_type": "channel"})
-                                with sqlite3.connect(DB_FILE) as conn:
-                                    conn.execute("""
-                                        INSERT INTO workspaces (id, name, workspace_type, last_active)
-                                        VALUES (?, ?, 'channel', ?)
-                                        ON CONFLICT(id) DO UPDATE SET name = excluded.name, last_active = excluded.last_active
-                                    """, (ch_id, full_label, now))
-            except Exception as te:
-                logger.warning(f"Teams channels discovery notice: {te}")
+            # 2. Known tenant channels (from sideloaded channel tabs)
+            # Channel IDs auto-register when the tab is opened inside them
+            pass
 
     except Exception as e:
         logger.warning(f"Workspace discovery exception: {e}")
@@ -258,10 +239,13 @@ async def sync_live_chat_messages(chat_id: str) -> Dict[str, Any]:
                 # Store members as a system reference record if available
                 if members_list:
                     members_text = f"Group chat members ({len(members_list)} total): " + ", ".join(members_list)
-                    c.execute("""
-                        INSERT OR REPLACE INTO teams_messages (project_id, message_id, thread_id, sender_name, timestamp, content, is_technical_signal)
-                        VALUES (?, ?, ?, 'System Roster', ?, ?, 1)
-                    """, (clean_chat_id, f"roster_{clean_chat_id}", clean_chat_id, now, members_text))
+                    try:
+                        c.execute("""
+                            INSERT OR REPLACE INTO teams_messages (project_id, message_id, thread_id, sender_name, timestamp, content, has_attachments, is_technical_signal, has_blocker)
+                            VALUES (?, ?, ?, 'System Roster', ?, ?, 0, 1, 0)
+                        """, (clean_chat_id, f"roster_{clean_chat_id}", clean_chat_id, now, members_text))
+                    except Exception as re_err:
+                        logger.warning(f"Roster record notice: {re_err}")
 
                 import re
                 import html
@@ -323,18 +307,19 @@ async def sync_live_chat_messages(chat_id: str) -> Dict[str, Any]:
 
                     clean_content = " ".join(text_parts).strip()
                     if clean_content:
-                        c.execute("""
-                            INSERT OR IGNORE INTO teams_messages (project_id, message_id, thread_id, sender_name, timestamp, content, is_technical_signal)
-                            VALUES (?, ?, ?, ?, ?, ?, 1)
-                        """, (clean_chat_id, msg_id, clean_chat_id, sender, created_time, clean_content))
+                        has_att = 1 if attachments else 0
                         try:
+                            c.execute("""
+                                INSERT OR IGNORE INTO teams_messages (project_id, message_id, thread_id, sender_name, timestamp, content, has_attachments, is_technical_signal, has_blocker)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0)
+                            """, (clean_chat_id, msg_id, clean_chat_id, sender, created_time, clean_content, has_att))
                             c.execute("""
                                 INSERT INTO teams_fts (message_id, sender, timestamp, content)
                                 VALUES (?, ?, ?, ?)
                             """, (msg_id, sender, created_time, clean_content))
-                        except Exception:
-                            pass
-                        synced_count += 1
+                            synced_count += 1
+                        except Exception as ins_err:
+                            logger.warning(f"Message insert notice: {ins_err}")
                 conn.commit()
 
             return {

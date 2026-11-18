@@ -24,6 +24,7 @@ class QueryRequest(BaseModel):
     group_id: Optional[str] = "all"
 
 class CreateSessionRequest(BaseModel):
+    session_id: Optional[str] = None
     title: Optional[str] = "New Conversation"
     user_id: Optional[str] = "default_user"
     user_name: Optional[str] = "Team Member"
@@ -77,14 +78,15 @@ def register_workspace(req: RegisterWorkspaceRequest):
 @router.get("/groups")
 async def list_available_groups():
     """Dynamically returns all discovered workspaces with cleaned, decoded labels."""
-    # Discover tenant group chats & channels if not yet cached
+    # Discover tenant group chats in background without blocking response
     try:
+        import asyncio
         with sqlite3.connect(DB_FILE) as conn:
             c = conn.cursor()
             c.execute("SELECT COUNT(*) FROM workspaces")
             if c.fetchone()[0] <= 1 and settings.AZURE_CLIENT_ID:
-                await discover_tenant_workspaces()
-    except Exception as de:
+                asyncio.create_task(discover_tenant_workspaces())
+    except Exception:
         pass
 
     groups = []
@@ -130,6 +132,17 @@ async def list_available_groups():
         if gid and gid not in seen:
             seen.add(gid)
             groups.append({"id": gid, "name": _clean_workspace_name(gid)})
+
+    # 5. Guaranteed Tenant Workspaces (Intranet Solutions & Team Channels)
+    tenant_defaults = [
+        {"id": "19:7bdcc4616332483b82e7488c4424ec23@thread.v2", "name": "Intranet Solutions"},
+        {"id": "channel_athen_tech_solutions_general", "name": "Athen Technology Solutions — General"},
+        {"id": "channel_synergy_comms_approvers_general", "name": "Synergy Comms Approvers — General"}
+    ]
+    for td in tenant_defaults:
+        if td["id"] not in seen:
+            seen.add(td["id"])
+            groups.append(td)
 
     if not groups:
         groups.append({"id": "default", "name": "General Workspace"})
@@ -189,7 +202,7 @@ def list_chat_sessions(
 @router.post("/sessions")
 def create_chat_session(req: CreateSessionRequest):
     """Creates a new isolated conversation session strictly bound to user_id."""
-    session_id = str(uuid.uuid4())
+    session_id = req.session_id or str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     gid = req.group_id or "all"
     uid = req.user_id or "default_user"
@@ -201,11 +214,14 @@ def create_chat_session(req: CreateSessionRequest):
         c.execute("""
             INSERT INTO chat_sessions (session_id, project_id, user_aad_id, user_name, title, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET updated_at = excluded.updated_at
         """, (session_id, gid, uid, uname, req.title, now, now))
-        c.execute("""
-            INSERT INTO chat_messages (session_id, role, content, created_at)
-            VALUES (?, 'assistant', ?, ?)
-        """, (session_id, f"Hello {greeting_name}! I am your personal NoMeet Delivery & Operations Copilot. How can I assist you with this workspace's tasks, bugs, or specifications today?", now))
+        c.execute("SELECT COUNT(*) FROM chat_messages WHERE session_id = ?", (session_id,))
+        if c.fetchone()[0] == 0:
+            c.execute("""
+                INSERT INTO chat_messages (session_id, role, content, created_at)
+                VALUES (?, 'assistant', ?, ?)
+            """, (session_id, f"Hello {greeting_name}! I am your personal NoMeet Delivery & Operations Copilot. How can I assist you with this workspace's tasks, bugs, or specifications today?", now))
         conn.commit()
     return {"session_id": session_id, "title": req.title, "group_id": gid, "user_id": uid}
 
@@ -251,20 +267,21 @@ async def execute_query(req: QueryRequest):
     """Direct query endpoint for Teams Cockpit, strictly scoped to user and active workspace."""
     now = datetime.now(timezone.utc).isoformat()
     session_id = req.session_id
-    gid = req.group_id or "all"
+    raw_gid = req.group_id or "all"
+    clean_gid = unquote(raw_gid).strip() if raw_gid != "all" else "all"
     uid = req.user_id or "default_user"
     uname = req.user_name or "Team Member"
 
     if not session_id:
         with sqlite3.connect(DB_FILE) as conn:
             c = conn.cursor()
-            if gid != "all":
+            if clean_gid != "all":
                 c.execute("""
                     SELECT session_id FROM chat_sessions 
                     WHERE (user_aad_id = ? OR user_aad_id = 'default_user' OR user_aad_id IS NULL) 
-                      AND (project_id = ? OR project_id = 'all')
+                      AND (project_id = ? OR project_id LIKE ? OR project_id = 'all')
                     ORDER BY updated_at DESC LIMIT 1
-                """, (uid, gid))
+                """, (uid, clean_gid, f"%{clean_gid[:8]}%"))
             else:
                 c.execute("""
                     SELECT session_id FROM chat_sessions 
@@ -279,7 +296,7 @@ async def execute_query(req: QueryRequest):
                 c.execute("""
                     INSERT INTO chat_sessions (session_id, project_id, user_aad_id, user_name, title, created_at, updated_at) 
                     VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (session_id, gid, uid, uname, req.query[:35] + "...", now, now))
+                """, (session_id, clean_gid, uid, uname, req.query[:35] + "...", now, now))
                 conn.commit()
 
     # Update session title if first query
@@ -296,15 +313,18 @@ async def execute_query(req: QueryRequest):
 
     # Automatically fetch live chat messages to capture real-time updates (e.g. newly typed leaves/messages)
     try:
-        target_chat = gid if (gid and gid != "all") else (settings.AUTHORIZED_GROUP_CHAT_IDS[0] if settings.AUTHORIZED_GROUP_CHAT_IDS else None)
+        target_chat = None
+        if clean_gid != "all" and ("19:" in clean_gid or "@thread" in clean_gid):
+            target_chat = clean_gid
+        elif settings.AUTHORIZED_GROUP_CHAT_IDS:
+            target_chat = settings.AUTHORIZED_GROUP_CHAT_IDS[0]
+
         if target_chat and settings.AZURE_CLIENT_ID:
             await sync_live_chat_messages(target_chat)
     except Exception as e:
-        pass
-    except Exception as e:
-        pass
+        logger.warning(f"Live chat sync notice during query: {e}")
 
-    res = run_agent_query(user_query=req.query, session_id=session_id, user_name=uname, group_id=gid)
+    res = run_agent_query(user_query=req.query, session_id=session_id, user_name=uname, group_id=clean_gid)
     return res
 
 # ==========================================

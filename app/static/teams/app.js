@@ -236,13 +236,29 @@ async function loadGroups() {
 }
 
 if (groupSelector) {
-  groupSelector.addEventListener("change", () => {
+  groupSelector.addEventListener("change", async () => {
     currentGroupId = groupSelector.value;
     currentSessionId = null;
     updateWorkspaceLabel();
-    loadMetrics();
-    loadSessions();
-    chatViewport.innerHTML = "";
+    
+    // Smooth loading indicator
+    chatViewport.innerHTML = `
+      <div class="workspace-loading-state">
+        <div class="spinner-pulse"></div>
+        <p style="margin-top:12px; font-weight:600; color:var(--text-main);">Connecting to ${cleanWorkspaceLabel(currentGroupId)}...</p>
+        <span style="font-size:12px; color:var(--text-muted);">Syncing live messages and project records</span>
+      </div>
+    `;
+
+    await loadMetrics();
+    await loadSessions();
+
+    const currentSessions = getLocalSessions().filter(s => currentGroupId === "all" || s.project_id === currentGroupId);
+    if (currentSessions.length > 0) {
+      await selectSession(currentSessions[0].session_id);
+    } else {
+      await createNewSession();
+    }
   });
 }
 
@@ -372,7 +388,7 @@ async function loadSessions() {
     card.dataset.sessionId = s.session_id;
     card.onclick = () => selectSession(s.session_id);
 
-    // Card Header: Project Micro-Badge & Timestamp
+    // Card Header: Project Micro-Badge & Timestamp & Delete Action
     const header = document.createElement("div");
     header.className = "session-card-header";
 
@@ -381,22 +397,12 @@ async function loadSessions() {
     const cleanProj = cleanWorkspaceLabel(s.project_id, s.project_name);
     projTag.innerText = (s.project_id === "all" || cleanProj === "All") ? "🌐 All Workspaces" : `📁 ${cleanProj}`;
 
+    const metaRight = document.createElement("div");
+    metaRight.className = "session-header-meta";
+
     const timeSpan = document.createElement("span");
     timeSpan.className = "session-time";
     timeSpan.innerText = timeAgo(s.updated_at || s.created_at);
-
-    header.appendChild(projTag);
-    header.appendChild(timeSpan);
-
-    // Card Title
-    const title = document.createElement("div");
-    title.className = "session-card-title";
-    title.innerText = s.title || "Conversation";
-
-    // Card Snippet
-    const snippet = document.createElement("div");
-    snippet.className = "session-card-snippet";
-    snippet.innerText = s.last_message || "No messages yet";
 
     // Delete Button
     const delBtn = document.createElement("button");
@@ -408,10 +414,25 @@ async function loadSessions() {
       deleteSession(s.session_id);
     };
 
+    metaRight.appendChild(timeSpan);
+    metaRight.appendChild(delBtn);
+
+    header.appendChild(projTag);
+    header.appendChild(metaRight);
+
+    // Card Title
+    const title = document.createElement("div");
+    title.className = "session-card-title";
+    title.innerText = s.title || "Conversation";
+
+    // Card Snippet
+    const snippet = document.createElement("div");
+    snippet.className = "session-card-snippet";
+    snippet.innerText = s.last_message || "No messages yet";
+
     card.appendChild(header);
     card.appendChild(title);
     card.appendChild(snippet);
-    card.appendChild(delBtn);
     sessionsList.appendChild(card);
   });
 
@@ -482,30 +503,27 @@ async function createNewSession() {
   }];
 
   saveLocalMessages(newSid, initialMsgs);
-  const localList = getLocalSessions();
+  const localList = getLocalSessions().filter(s => s.session_id !== newSid);
   localList.unshift(newSessionObj);
   saveLocalSessions(localList);
   currentSessionId = newSid;
 
-  // Background server registration
+  // Server registration with matching session_id
   try {
-    fetch(`${API_BASE}/api/v1/teams/sessions`, {
+    await fetch(`${API_BASE}/api/v1/teams/sessions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        session_id: newSid,
         title: "New Conversation",
         group_id: currentGroupId,
         user_id: currentUserId,
         user_name: currentUserName
       })
-    }).then(r => r.json()).then(data => {
-      if (data && data.session_id) {
-        newSessionObj.session_id = data.session_id;
-        saveLocalMessages(data.session_id, initialMsgs);
-        saveLocalSessions(getLocalSessions());
-      }
-    }).catch(e => {});
-  } catch (e) {}
+    });
+  } catch (e) {
+    console.warn("Server session register notice:", e);
+  }
 
   await loadSessions();
   await selectSession(currentSessionId);
@@ -520,15 +538,20 @@ async function deleteSession(sessionId) {
     localStorage.removeItem(`nomeet_msgs_${sessionId}`);
   } catch (e) {}
 
-  if (currentSessionId === sessionId) {
-    currentSessionId = null;
-  }
-
   try {
     fetch(`${API_BASE}/api/v1/teams/sessions/${sessionId}`, { method: "DELETE" });
   } catch (e) {}
 
-  loadSessions();
+  await loadSessions();
+
+  if (currentSessionId === sessionId) {
+    const remaining = localList.filter(s => currentGroupId === "all" || s.project_id === currentGroupId);
+    if (remaining.length > 0) {
+      await selectSession(remaining[0].session_id);
+    } else {
+      await createNewSession();
+    }
+  }
 }
 
 // Handle Form Submission

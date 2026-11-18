@@ -69,15 +69,16 @@ def deterministic_grounded_answer(query: str, group_id: str = "all") -> str:
             )
 
         # 3. Leave / Time-off inquiries
+        clean_gid = group_id.split("@")[0].replace("19:", "").strip() if group_id and group_id != "all" else ""
         if any(w in q_low for w in ["leave", "leaves", "absent", "vacation", "holiday", "off"]):
-            if group_id != "all":
+            if clean_gid:
                 c.execute("""
                     SELECT sender_name, timestamp, content 
                     FROM teams_messages 
                     WHERE (lower(content) LIKE '%leave%' OR lower(content) LIKE '%fever%' OR lower(content) LIKE '%absent%')
-                      AND (project_id = ? OR project_id = 'all')
+                      AND (project_id = ? OR project_id LIKE ? OR project_id = 'all')
                     ORDER BY timestamp DESC
-                """, (group_id,))
+                """, (group_id, f"%{clean_gid}%"))
             else:
                 c.execute("""
                     SELECT sender_name, timestamp, content 
@@ -99,7 +100,10 @@ def deterministic_grounded_answer(query: str, group_id: str = "all") -> str:
 
         # 4. Group Members / People inquiries
         if any(w in q_low for w in ["people", "peoples", "member", "members", "who is in", "participants"]):
-            c.execute("SELECT content FROM teams_messages WHERE message_id LIKE 'roster_%' ORDER BY id DESC LIMIT 1")
+            if clean_gid:
+                c.execute("SELECT content FROM teams_messages WHERE message_id LIKE 'roster_%' AND (project_id = ? OR project_id LIKE ? OR project_id = 'all') ORDER BY id DESC LIMIT 1", (group_id, f"%{clean_gid}%"))
+            else:
+                c.execute("SELECT content FROM teams_messages WHERE message_id LIKE 'roster_%' ORDER BY id DESC LIMIT 1")
             roster_row = c.fetchone()
             if roster_row and roster_row[0]:
                 return (
@@ -109,8 +113,8 @@ def deterministic_grounded_answer(query: str, group_id: str = "all") -> str:
                     f"- Sourced directly from verified Microsoft 365 Entra ID / Teams roster."
                 )
             # Fallback to distinct senders
-            if group_id != "all":
-                c.execute("SELECT DISTINCT sender_name FROM teams_messages WHERE sender_name != 'System Roster' AND project_id = ?", (group_id,))
+            if clean_gid:
+                c.execute("SELECT DISTINCT sender_name FROM teams_messages WHERE sender_name != 'System Roster' AND (project_id = ? OR project_id LIKE ? OR project_id = 'all')", (group_id, f"%{clean_gid}%"))
             else:
                 c.execute("SELECT DISTINCT sender_name FROM teams_messages WHERE sender_name != 'System Roster'")
             senders = [r[0] for r in c.fetchall() if r[0]]
@@ -178,81 +182,95 @@ def run_agent_query(user_query: str, session_id: str = "default_session", user_n
                 {"role": "system", "content": scoped_system_prompt},
                 {"role": "user", "content": user_query}
             ]
-            models_to_try = [settings.GROQ_MODEL, "llama-3.1-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"]
+            models_to_try = [settings.GROQ_MODEL, "llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+            # Filter out known decommissioned models
+            models_to_try = [m for m in dict.fromkeys(models_to_try) if m and m not in {"llama-3.1-70b-versatile", "mixtral-8x7b-32768"}]
+            if not models_to_try:
+                models_to_try = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+
             active_model = None
             with httpx.Client(timeout=20.0) as client:
                 for cand_model in models_to_try:
-                    if not cand_model:
-                        continue
-                    payload = {
-                        "model": cand_model,
-                        "messages": messages,
-                        "tools": AGENT_TOOLS_DEFINITIONS,
-                        "tool_choice": "auto",
-                        "temperature": 0.0,
-                        "max_tokens": 1024
-                    }
-                    r1 = client.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
-                    if r1.status_code == 200:
-                        active_model = cand_model
-                        choice = r1.json()["choices"][0]["message"]
-                        tool_calls = choice.get("tool_calls")
-                        if not tool_calls:
-                            if choice.get("content"):
-                                final_content = choice["content"]
-                        else:
-                            messages.append(choice)
-                            for tc in tool_calls:
-                                fn = tc["function"]["name"]
-                                args = json.loads(tc["function"]["arguments"]) if isinstance(tc["function"]["arguments"], str) else (tc["function"]["arguments"] or {})
-                                handler = TOOL_DISPATCHER.get(fn)
-                                output = handler(**args) if handler else json.dumps({"error": "Unknown tool"})
-                                evidence_trail.append({"tool": fn, "args": args, "output": output[:300]})
-                                messages.append({
-                                    "role": "tool",
-                                    "tool_call_id": tc["id"],
-                                    "content": output
+                    try:
+                        payload = {
+                            "model": cand_model,
+                            "messages": messages,
+                            "tools": AGENT_TOOLS_DEFINITIONS,
+                            "tool_choice": "auto",
+                            "temperature": 0.0,
+                            "max_tokens": 1024
+                        }
+                        r1 = client.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
+                        if r1.status_code == 200:
+                            active_model = cand_model
+                            choice = r1.json()["choices"][0]["message"]
+                            tool_calls = choice.get("tool_calls")
+                            if not tool_calls:
+                                if choice.get("content"):
+                                    final_content = choice["content"]
+                            else:
+                                messages.append(choice)
+                                for tc in tool_calls:
+                                    fn = tc["function"]["name"]
+                                    args = json.loads(tc["function"]["arguments"]) if isinstance(tc["function"]["arguments"], str) else (tc["function"]["arguments"] or {})
+                                    handler = TOOL_DISPATCHER.get(fn)
+                                    output = handler(**args) if handler else json.dumps({"error": "Unknown tool"})
+                                    evidence_trail.append({"tool": fn, "args": args, "output": output[:300]})
+                                    messages.append({
+                                        "role": "tool",
+                                        "tool_call_id": tc["id"],
+                                        "content": output
+                                    })
+                                r2 = client.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json={
+                                    "model": active_model,
+                                    "messages": messages,
+                                    "temperature": 0.0,
+                                    "max_tokens": 1024
                                 })
-                            r2 = client.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json={
-                                "model": active_model,
-                                "messages": messages,
-                                "temperature": 0.0,
-                                "max_tokens": 1024
-                            })
-                            if r2.status_code == 200:
-                                final_content = r2.json()["choices"][0]["message"].get("content")
-                        break
-                    elif r1.status_code == 404:
-                        continue  # Try next model candidate
-                    else:
-                        break
+                                if r2.status_code == 200:
+                                    final_content = r2.json()["choices"][0]["message"].get("content")
+                            break
+                        else:
+                            # If 400 (e.g. tool_use_failed) or 404 (model not found), try next model
+                            continue
+                    except Exception as model_err:
+                        continue
 
-                # Direct completion fallback if tool calling failed (e.g. 400 Bad Request)
+                # Direct completion fallback with retrieved context if tool calling failed
                 if not final_content:
                     retrieved_context = ""
                     try:
+                        clean_gid = group_id.split("@")[0].replace("19:", "").strip() if group_id and group_id != "all" else ""
                         with sqlite3.connect(DB_FILE) as conn:
                             conn.row_factory = sqlite3.Row
                             c = conn.cursor()
-                            c.execute("SELECT sender_name, timestamp, content FROM teams_messages ORDER BY id DESC LIMIT 15")
+                            if clean_gid:
+                                c.execute("SELECT sender_name, timestamp, content FROM teams_messages WHERE (project_id = ? OR project_id LIKE ? OR project_id = 'all') ORDER BY id DESC LIMIT 15", (group_id, f"%{clean_gid}%"))
+                            else:
+                                c.execute("SELECT sender_name, timestamp, content FROM teams_messages ORDER BY id DESC LIMIT 15")
                             rows = c.fetchall()
                             if rows:
                                 retrieved_context = "\n".join(f"- [{r['sender_name']} @ {r['timestamp'][:10]}]: {r['content']}" for r in rows)
                     except Exception:
                         pass
 
-                    direct_payload = {
-                        "model": "llama-3.1-8b-instant",
-                        "messages": [
-                            {"role": "system", "content": f"{scoped_system_prompt}\n\nWorkspace Context:\n{retrieved_context}"},
-                            {"role": "user", "content": user_query}
-                        ],
-                        "temperature": 0.1,
-                        "max_tokens": 1024
-                    }
-                    r_direct = client.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=direct_payload)
-                    if r_direct.status_code == 200:
-                        final_content = r_direct.json()["choices"][0]["message"].get("content")
+                    for fallback_model in ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]:
+                        try:
+                            direct_payload = {
+                                "model": fallback_model,
+                                "messages": [
+                                    {"role": "system", "content": f"{scoped_system_prompt}\n\nWorkspace Context:\n{retrieved_context}"},
+                                    {"role": "user", "content": user_query}
+                                ],
+                                "temperature": 0.1,
+                                "max_tokens": 1024
+                            }
+                            r_direct = client.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=direct_payload)
+                            if r_direct.status_code == 200:
+                                final_content = r_direct.json()["choices"][0]["message"].get("content")
+                                break
+                        except Exception:
+                            continue
         except Exception as e:
             print(f"[Tier 1 Groq REST Error]: {e}. Attempting fallback...")
 

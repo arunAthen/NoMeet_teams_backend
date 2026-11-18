@@ -99,9 +99,10 @@ async def list_available_groups():
             c.execute("SELECT id, name FROM workspaces ORDER BY last_active DESC")
             for r in c.fetchall():
                 gid, gname = r[0], r[1]
-                if gid and gid not in seen:
-                    seen.add(gid)
-                    groups.append({"id": gid, "name": _clean_workspace_name(gid, gname)})
+                norm_id = unquote(gid).strip() if gid else ""
+                if norm_id and norm_id not in seen:
+                    seen.add(norm_id)
+                    groups.append({"id": norm_id, "name": _clean_workspace_name(norm_id, gname)})
         except Exception:
             pass
 
@@ -110,9 +111,10 @@ async def list_available_groups():
             c.execute("SELECT DISTINCT project_id FROM project_items WHERE project_id IS NOT NULL")
             for r in c.fetchall():
                 gid = r[0]
-                if gid and gid not in seen:
-                    seen.add(gid)
-                    groups.append({"id": gid, "name": _clean_workspace_name(gid)})
+                norm_id = unquote(gid).strip() if gid else ""
+                if norm_id and norm_id not in seen:
+                    seen.add(norm_id)
+                    groups.append({"id": norm_id, "name": _clean_workspace_name(norm_id)})
         except Exception:
             pass
 
@@ -121,17 +123,19 @@ async def list_available_groups():
             c.execute("SELECT DISTINCT project_id FROM teams_messages WHERE project_id IS NOT NULL")
             for r in c.fetchall():
                 gid = r[0]
-                if gid and gid not in seen:
-                    seen.add(gid)
-                    groups.append({"id": gid, "name": _clean_workspace_name(gid)})
+                norm_id = unquote(gid).strip() if gid else ""
+                if norm_id and norm_id not in seen:
+                    seen.add(norm_id)
+                    groups.append({"id": norm_id, "name": _clean_workspace_name(norm_id)})
         except Exception:
             pass
 
     # 4. Configured group IDs fallback
     for gid in settings.AUTHORIZED_GROUP_CHAT_IDS:
-        if gid and gid not in seen:
-            seen.add(gid)
-            groups.append({"id": gid, "name": _clean_workspace_name(gid)})
+        norm_id = unquote(gid).strip() if gid else ""
+        if norm_id and norm_id not in seen:
+            seen.add(norm_id)
+            groups.append({"id": norm_id, "name": _clean_workspace_name(norm_id)})
 
     # 5. Guaranteed Tenant Workspaces (Intranet Solutions & Team Channels)
     tenant_defaults = [
@@ -140,9 +144,10 @@ async def list_available_groups():
         {"id": "channel_synergy_comms_approvers_general", "name": "Synergy Comms Approvers — General"}
     ]
     for td in tenant_defaults:
-        if td["id"] not in seen:
-            seen.add(td["id"])
-            groups.append(td)
+        norm_id = unquote(td["id"]).strip()
+        if norm_id not in seen:
+            seen.add(norm_id)
+            groups.append({"id": norm_id, "name": td["name"]})
 
     if not groups:
         groups.append({"id": "default", "name": "General Workspace"})

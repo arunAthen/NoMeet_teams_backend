@@ -239,7 +239,6 @@ async function loadGroups() {
 if (groupSelector) {
   groupSelector.addEventListener("change", async () => {
     currentGroupId = groupSelector.value;
-    currentSessionId = null;
     updateWorkspaceLabel();
     
     // Smooth loading indicator
@@ -252,14 +251,10 @@ if (groupSelector) {
     `;
 
     await loadMetrics();
+    const sess = getOrCreateSessionForWorkspace(currentGroupId);
+    currentSessionId = sess.session_id;
+    await selectSession(sess.session_id);
     await loadSessions();
-
-    const currentSessions = getLocalSessions().filter(s => currentGroupId === "all" || s.project_id === currentGroupId);
-    if (currentSessions.length > 0) {
-      await selectSession(currentSessions[0].session_id);
-    } else {
-      await createNewSession();
-    }
   });
 }
 
@@ -345,14 +340,65 @@ function appendMessage(role, content, evidence = [], evalScores = null) {
   chatViewport.scrollTop = chatViewport.scrollHeight;
 }
 
-// Load Sessions List (Strict Personal User Isolation + Persistent Local Cache)
+// Workspace to Session Mapping (1 Workspace = 1 Persistent Chat Thread)
+function getSessionIdForWorkspace(groupId) {
+  const cleanId = (groupId || "all").replace(/[^a-zA-Z0-9]/g, "_").slice(-24);
+  const uid = (currentUserId || "user").slice(-8);
+  return `ws_${cleanId}_${uid}`;
+}
+
+function getOrCreateSessionForWorkspace(groupId) {
+  const sid = getSessionIdForWorkspace(groupId);
+  const localList = getLocalSessions();
+  let sess = localList.find(s => s.session_id === sid || s.project_id === groupId);
+  const now = new Date().toISOString();
+  const greetingName = (currentUserName && currentUserName !== "Team Member") ? currentUserName : "there";
+  const label = cleanWorkspaceLabel(groupId);
+
+  if (!sess) {
+    sess = {
+      session_id: sid,
+      title: label,
+      project_id: groupId || "all",
+      project_name: label,
+      user_id: currentUserId,
+      user_name: currentUserName,
+      created_at: now,
+      updated_at: now,
+      last_message: "No messages yet"
+    };
+    const initialMsgs = [{
+      role: "assistant",
+      content: `Hello ${greetingName}! I am your personal NoMeet Delivery & Operations Copilot for ${label}. How can I assist you with this workspace's tasks, bugs, or specifications today?`
+    }];
+    saveLocalMessages(sid, initialMsgs);
+    localList.unshift(sess);
+    saveLocalSessions(localList);
+
+    // Register on server
+    try {
+      fetch(`${API_BASE}/api/v1/teams/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: sid,
+          title: label,
+          group_id: groupId,
+          user_id: currentUserId,
+          user_name: currentUserName
+        })
+      }).catch(() => {});
+    } catch (e) {}
+  }
+  return sess;
+}
+
+// Load Sessions List (All Workspaces Visible in Sidebar at All Times)
 async function loadSessions() {
   let serverSessions = [];
   try {
     const params = new URLSearchParams();
     if (currentUserId) params.set("user_id", currentUserId);
-    if (currentGroupId && currentGroupId !== "all") params.set("group_id", currentGroupId);
-
     const res = await fetch(`${API_BASE}/api/v1/teams/sessions?${params.toString()}`);
     if (res.ok) {
       serverSessions = await res.json();
@@ -361,35 +407,58 @@ async function loadSessions() {
     console.warn("Server sessions fetch warning:", e);
   }
 
-  // Merge server sessions with local storage cache (dedup by session_id)
+  // Merge server sessions with local storage cache (dedup by project_id / session_id)
   const localList = getLocalSessions();
   const sessionMap = new Map();
-  localList.forEach(s => sessionMap.set(s.session_id, s));
+  localList.forEach(s => {
+    const key = s.project_id || s.session_id;
+    sessionMap.set(key, s);
+  });
   if (Array.isArray(serverSessions)) {
-    serverSessions.forEach(s => sessionMap.set(s.session_id, s));
+    serverSessions.forEach(s => {
+      const key = s.project_id || s.session_id;
+      if (!sessionMap.has(key)) {
+        sessionMap.set(key, s);
+      } else {
+        const existing = sessionMap.get(key);
+        if (s.updated_at && (!existing.updated_at || new Date(s.updated_at) > new Date(existing.updated_at))) {
+          existing.updated_at = s.updated_at;
+          existing.last_message = s.last_message;
+        }
+      }
+    });
   }
 
+  // Ensure active workspace is in the list
+  const activeSess = getOrCreateSessionForWorkspace(currentGroupId);
+  sessionMap.set(currentGroupId || "all", activeSess);
+
   let mergedSessions = Array.from(sessionMap.values());
-  if (currentGroupId && currentGroupId !== "all") {
-    mergedSessions = mergedSessions.filter(s => s.project_id === currentGroupId || s.project_id === "all");
-  }
   mergedSessions.sort((a, b) => new Date(b.updated_at || b.created_at || 0) - new Date(a.updated_at || a.created_at || 0));
   saveLocalSessions(mergedSessions);
 
   sessionsList.innerHTML = "";
 
-  if (mergedSessions.length === 0) {
-    await createNewSession();
-    return;
-  }
-
   mergedSessions.forEach(s => {
     const card = document.createElement("div");
-    card.className = `session-card ${s.session_id === currentSessionId ? "active" : ""}`;
+    const isActive = (s.session_id === currentSessionId) || (s.project_id === currentGroupId);
+    card.className = `session-card ${isActive ? "active" : ""}`;
     card.dataset.sessionId = s.session_id;
-    card.onclick = () => selectSession(s.session_id);
+    card.dataset.projectId = s.project_id;
 
-    // Card Header: Project Micro-Badge & Timestamp & Delete Action
+    // Click card -> switches dropdown & loads that workspace's dedicated chat
+    card.onclick = async () => {
+      if (s.project_id && s.project_id !== currentGroupId) {
+        currentGroupId = s.project_id;
+        if (groupSelector) groupSelector.value = currentGroupId;
+        updateWorkspaceLabel();
+        loadMetrics();
+      }
+      await selectSession(s.session_id);
+      loadSessions();
+    };
+
+    // Card Header: Project Micro-Badge & Timestamp & Reset Action
     const header = document.createElement("div");
     header.className = "session-card-header";
 
@@ -405,11 +474,11 @@ async function loadSessions() {
     timeSpan.className = "session-time";
     timeSpan.innerText = timeAgo(s.updated_at || s.created_at);
 
-    // Delete Button
+    // Delete / Clear Button
     const delBtn = document.createElement("button");
     delBtn.className = "btn-del-session";
     delBtn.innerHTML = "🗑️";
-    delBtn.title = "Delete Conversation";
+    delBtn.title = "Clear Conversation";
     delBtn.onclick = (e) => {
       e.stopPropagation();
       deleteSession(s.session_id);
@@ -424,7 +493,7 @@ async function loadSessions() {
     // Card Title
     const title = document.createElement("div");
     title.className = "session-card-title";
-    title.innerText = s.title || "Conversation";
+    title.innerText = s.title || cleanProj;
 
     // Card Snippet
     const snippet = document.createElement("div");
@@ -437,8 +506,9 @@ async function loadSessions() {
     sessionsList.appendChild(card);
   });
 
-  if (!currentSessionId && mergedSessions.length > 0) {
-    selectSession(mergedSessions[0].session_id);
+  if (!currentSessionId) {
+    currentSessionId = activeSess.session_id;
+    selectSession(currentSessionId);
   }
 }
 
@@ -467,7 +537,6 @@ async function selectSession(sessionId) {
     if (res.ok) {
       const data = await res.json();
       if (data.messages && data.messages.length > 0) {
-        // Only re-render if message count or last message changed to prevent UI flicker
         if (data.messages.length !== cachedMessages.length) {
           chatViewport.innerHTML = "";
           data.messages.forEach(m => appendMessage(m.role, m.content, m.evidence, m.eval_scores));
@@ -480,61 +549,8 @@ async function selectSession(sessionId) {
   }
 }
 
-// Create New Session (Strict Personal User Isolation)
-async function createNewSession() {
-  const newSid = "sess_" + Math.random().toString(36).substring(2, 12);
-  const now = new Date().toISOString();
-  const greetingName = (currentUserName && currentUserName !== "Team Member") ? currentUserName : "there";
-
-  const newSessionObj = {
-    session_id: newSid,
-    title: "New Conversation",
-    project_id: currentGroupId || "all",
-    project_name: cleanWorkspaceLabel(currentGroupId),
-    user_id: currentUserId,
-    user_name: currentUserName,
-    created_at: now,
-    updated_at: now,
-    last_message: "No messages yet"
-  };
-
-  const initialMsgs = [{
-    role: "assistant",
-    content: `Hello ${greetingName}! I am your personal NoMeet Delivery & Operations Copilot. How can I assist you with this workspace's tasks, bugs, or specifications today?`
-  }];
-
-  saveLocalMessages(newSid, initialMsgs);
-  const localList = getLocalSessions().filter(s => s.session_id !== newSid);
-  localList.unshift(newSessionObj);
-  saveLocalSessions(localList);
-  currentSessionId = newSid;
-
-  // Server registration with matching session_id
-  try {
-    await fetch(`${API_BASE}/api/v1/teams/sessions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        session_id: newSid,
-        title: "New Conversation",
-        group_id: currentGroupId,
-        user_id: currentUserId,
-        user_name: currentUserName
-      })
-    });
-  } catch (e) {
-    console.warn("Server session register notice:", e);
-  }
-
-  await loadSessions();
-  await selectSession(currentSessionId);
-}
-
-// Delete Session
+// Reset / Clear Session
 async function deleteSession(sessionId) {
-  // Remove from local cache
-  const localList = getLocalSessions().filter(s => s.session_id !== sessionId);
-  saveLocalSessions(localList);
   try {
     localStorage.removeItem(`nomeet_msgs_${sessionId}`);
   } catch (e) {}
@@ -543,16 +559,24 @@ async function deleteSession(sessionId) {
     fetch(`${API_BASE}/api/v1/teams/sessions/${sessionId}`, { method: "DELETE" });
   } catch (e) {}
 
-  await loadSessions();
-
-  if (currentSessionId === sessionId) {
-    const remaining = localList.filter(s => currentGroupId === "all" || s.project_id === currentGroupId);
-    if (remaining.length > 0) {
-      await selectSession(remaining[0].session_id);
-    } else {
-      await createNewSession();
-    }
+  // Reset local session messages with clean greeting
+  const localList = getLocalSessions();
+  const sess = localList.find(s => s.session_id === sessionId);
+  if (sess) {
+    const greetingName = (currentUserName && currentUserName !== "Team Member") ? currentUserName : "there";
+    const label = cleanWorkspaceLabel(sess.project_id);
+    const initialMsgs = [{
+      role: "assistant",
+      content: `Hello ${greetingName}! I am your personal NoMeet Delivery & Operations Copilot for ${label}. How can I assist you with this workspace's tasks, bugs, or specifications today?`
+    }];
+    saveLocalMessages(sessionId, initialMsgs);
+    sess.last_message = "No messages yet";
+    sess.updated_at = new Date().toISOString();
+    saveLocalSessions(localList);
   }
+
+  await selectSession(sessionId);
+  await loadSessions();
 }
 
 // Handle Form Submission
@@ -644,7 +668,13 @@ document.querySelectorAll(".chip").forEach(chip => {
   };
 });
 
-newSessionBtn.onclick = createNewSession;
+if (newSessionBtn) {
+  newSessionBtn.onclick = () => {
+    if (currentSessionId) {
+      deleteSession(currentSessionId);
+    }
+  };
+}
 
 const clearChatBtn = document.getElementById("clearChatBtn");
 if (clearChatBtn) {

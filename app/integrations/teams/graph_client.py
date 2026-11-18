@@ -95,9 +95,9 @@ async def get_azure_token_diagnostics() -> Dict[str, Any]:
             "error": str(e)
         }
 
-async def discover_tenant_workspaces() -> List[Dict[str, Any]]:
+async def discover_tenant_workspaces(user_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """
-    Dynamically discovers all Group Chats and Team Channels across the Microsoft 365 tenant.
+    Dynamically discovers all Group Chats across the Microsoft 365 tenant using /users/{user_id}/chats.
     Auto-populates the workspaces table.
     """
     client_id = settings.AZURE_CLIENT_ID
@@ -125,29 +125,48 @@ async def discover_tenant_workspaces() -> List[Dict[str, Any]]:
             graph_headers = {"Authorization": f"Bearer {access_token}"}
             now = datetime.now(timezone.utc).isoformat()
 
-            # 1. Discover all Group Chats (No $select to avoid 400 Bad Request)
-            try:
-                chats_resp = await client.get("https://graph.microsoft.com/v1.0/chats?$top=50", headers=graph_headers)
-                if chats_resp.status_code == 200:
-                    for ch in chats_resp.json().get("value", []):
-                        cid = ch.get("id")
-                        topic = ch.get("topic")
-                        if not topic and "7bdcc" in cid.lower():
-                            topic = "Intranet Solutions"
-                        cname = topic or f"Chat {cid.split('@')[0].replace('19:', '')[:8].upper()}"
-                        discovered.append({"id": cid, "name": cname, "workspace_type": "chat"})
-                        with sqlite3.connect(DB_FILE) as conn:
-                            conn.execute("""
-                                INSERT INTO workspaces (id, name, workspace_type, last_active)
-                                VALUES (?, ?, 'chat', ?)
-                                ON CONFLICT(id) DO UPDATE SET name = excluded.name, last_active = excluded.last_active
-                            """, (cid, cname, now))
-            except Exception as ce:
-                logger.warning(f"Chats discovery notice: {ce}")
+            # Target users to discover group chats from
+            candidate_user_ids = []
+            if user_id and user_id != "default_user" and not user_id.startswith("user_"):
+                candidate_user_ids.append(user_id)
 
-            # 2. Known tenant channels (from sideloaded channel tabs)
-            # Channel IDs auto-register when the tab is opened inside them
-            pass
+            # Discover users in tenant to query their group chats
+            try:
+                users_resp = await client.get("https://graph.microsoft.com/v1.0/users?$top=10", headers=graph_headers)
+                if users_resp.status_code == 200:
+                    for u in users_resp.json().get("value", []):
+                        uid = u.get("id")
+                        if uid and uid not in candidate_user_ids:
+                            candidate_user_ids.append(uid)
+            except Exception as ue:
+                logger.warning(f"Users query notice: {ue}")
+
+            # Query group chats for candidate users
+            seen_cids = set()
+            for cuid in candidate_user_ids[:6]:
+                try:
+                    c_resp = await client.get(f"https://graph.microsoft.com/v1.0/users/{cuid}/chats", headers=graph_headers)
+                    if c_resp.status_code == 200:
+                        for ch in c_resp.json().get("value", []):
+                            cid = ch.get("id")
+                            if not cid or cid in seen_cids:
+                                continue
+                            seen_cids.add(cid)
+                            chat_type = ch.get("chatType")
+                            topic = ch.get("topic")
+                            if chat_type == "group" or topic:
+                                if not topic and "7bdcc" in cid.lower():
+                                    topic = "Intranet Solutions"
+                                cname = topic or f"Chat {cid.split('@')[0].replace('19:', '')[:8].upper()}"
+                                discovered.append({"id": cid, "name": cname, "workspace_type": "chat"})
+                                with sqlite3.connect(DB_FILE) as conn:
+                                    conn.execute("""
+                                        INSERT INTO workspaces (id, name, workspace_type, last_active)
+                                        VALUES (?, ?, 'chat', ?)
+                                        ON CONFLICT(id) DO UPDATE SET name = excluded.name, last_active = excluded.last_active
+                                    """, (cid, cname, now))
+                except Exception as c_err:
+                    logger.warning(f"User {cuid} chats notice: {c_err}")
 
     except Exception as e:
         logger.warning(f"Workspace discovery exception: {e}")

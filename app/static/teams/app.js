@@ -198,7 +198,8 @@ function updateWorkspaceLabel() {
 // Load Groups / Workspaces Dropdown
 async function loadGroups() {
   try {
-    const res = await fetch(`${API_BASE}/api/v1/teams/groups`);
+    const url = currentUserId ? `${API_BASE}/api/v1/teams/groups?user_id=${encodeURIComponent(currentUserId)}` : `${API_BASE}/api/v1/teams/groups`;
+    const res = await fetch(url);
     const data = await res.json();
     if (!groupSelector) return;
 

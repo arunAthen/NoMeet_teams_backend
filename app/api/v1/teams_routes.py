@@ -76,16 +76,13 @@ def register_workspace(req: RegisterWorkspaceRequest):
     return {"status": "registered", "id": clean_id, "name": clean_name}
 
 @router.get("/groups")
-async def list_available_groups():
+async def list_available_groups(user_id: Optional[str] = None):
     """Dynamically returns all discovered workspaces with cleaned, decoded labels."""
     # Discover tenant group chats in background without blocking response
     try:
         import asyncio
-        with sqlite3.connect(DB_FILE) as conn:
-            c = conn.cursor()
-            c.execute("SELECT COUNT(*) FROM workspaces")
-            if c.fetchone()[0] <= 1 and settings.AZURE_CLIENT_ID:
-                asyncio.create_task(discover_tenant_workspaces())
+        if settings.AZURE_CLIENT_ID:
+            asyncio.create_task(discover_tenant_workspaces(user_id=user_id))
     except Exception:
         pass
 
@@ -137,8 +134,9 @@ async def list_available_groups():
             seen.add(norm_id)
             groups.append({"id": norm_id, "name": _clean_workspace_name(norm_id)})
 
-    # 5. Guaranteed Tenant Workspaces (Intranet Solutions & Team Channels)
+    # 5. Guaranteed Tenant Workspaces (AgentAI Bot, Intranet Solutions & Team Channels)
     tenant_defaults = [
+        {"id": "19:2337de30cb834d059c344292c8377656@thread.v2", "name": "AgentAI Bot"},
         {"id": "19:7bdcc4616332483b82e7488c4424ec23@thread.v2", "name": "Intranet Solutions"},
         {"id": "channel_athen_tech_solutions_general", "name": "Athen Technology Solutions — General"},
         {"id": "channel_synergy_comms_approvers_general", "name": "Synergy Comms Approvers — General"}

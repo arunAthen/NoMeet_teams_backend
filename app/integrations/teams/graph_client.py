@@ -158,26 +158,51 @@ async def sync_live_chat_messages(chat_id: str) -> Dict[str, Any]:
             # Store live messages into SQLite
             with sqlite3.connect(DB_FILE) as conn:
                 c = conn.cursor()
-                # Update workspace name
                 now = datetime.now(timezone.utc).isoformat()
-                c.execute("""
-                    INSERT INTO workspaces (id, name, workspace_type, last_active)
-                    VALUES (?, ?, 'chat', ?)
-                    ON CONFLICT(id) DO UPDATE SET name = excluded.name, last_active = excluded.last_active
-                """, (clean_chat_id, clean_name, now))
+
+                # Update workspace name immediately so it registers properly
+                try:
+                    c.execute("""
+                        INSERT INTO workspaces (id, name, workspace_type, last_active)
+                        VALUES (?, ?, 'chat', ?)
+                        ON CONFLICT(id) DO UPDATE SET name = excluded.name, last_active = excluded.last_active
+                    """, (clean_chat_id, clean_name, now))
+                    conn.commit()
+                except Exception as we:
+                    logger.warning(f"Failed to update workspace record: {we}")
 
                 for msg in messages_data:
+                    if not isinstance(msg, dict):
+                        continue
                     msg_id = msg.get("id")
-                    body = msg.get("body", {}).get("content", "")
-                    sender = msg.get("from", {}).get("user", {}).get("displayName", "Team Member")
-                    created_time = msg.get("createdDateTime", now)
+                    if not msg_id:
+                        continue
+
+                    # Safe body extraction (handles null body or null content in system events)
+                    body_obj = msg.get("body")
+                    body = ""
+                    if isinstance(body_obj, dict):
+                        body = body_obj.get("content") or ""
+
+                    # Safe sender extraction (handles user, bot application/workflow, or system messages)
+                    from_obj = msg.get("from")
+                    sender = "Team Member"
+                    if isinstance(from_obj, dict):
+                        user_info = from_obj.get("user") or from_obj.get("application") or {}
+                        if isinstance(user_info, dict):
+                            sender = user_info.get("displayName") or "Team Member"
+                        elif isinstance(user_info, str):
+                            sender = user_info
+
+                    created_time = msg.get("createdDateTime") or now
 
                     if not body or "<attachment" in body.lower():
                         continue
 
-                    # Clean html tags from Graph message body
+                    # Clean html tags & entities from Graph message body
                     import re
-                    clean_content = re.sub(r"<[^>]+>", " ", body).strip()
+                    import html
+                    clean_content = html.unescape(re.sub(r"<[^>]+>", " ", body)).strip()
                     if clean_content:
                         c.execute("""
                             INSERT OR IGNORE INTO teams_messages (project_id, message_id, thread_id, sender_name, timestamp, content, is_technical_signal)

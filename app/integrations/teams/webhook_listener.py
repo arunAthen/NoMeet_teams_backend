@@ -21,8 +21,18 @@ async def handle_graph_chat_webhook(payload: Dict[str, Any]) -> Dict[str, Any]:
 
         if change_type in ("created", "updated"):
             # If notification contains encrypted/delta content or requires fetch:
-            content = resource_data.get("body", {}).get("content", "")
-            sender = resource_data.get("from", {}).get("user", {}).get("displayName", "Team Member")
+            body_obj = resource_data.get("body")
+            content = body_obj.get("content", "") if isinstance(body_obj, dict) else ""
+            
+            from_obj = resource_data.get("from")
+            sender = "Team Member"
+            if isinstance(from_obj, dict):
+                user_info = from_obj.get("user") or from_obj.get("application") or {}
+                if isinstance(user_info, dict):
+                    sender = user_info.get("displayName") or "Team Member"
+                elif isinstance(user_info, str):
+                    sender = user_info
+            
             timestamp = resource_data.get("createdDateTime", "")
             
             if content:

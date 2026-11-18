@@ -68,7 +68,55 @@ def deterministic_grounded_answer(query: str, group_id: str = "all") -> str:
                 f"### ⚡ Actionable Next Steps\n- Coordinate with assigned engineers for closure."
             )
 
-        # 3. Pull Requests / General Teams search
+        # 3. Leave / Time-off inquiries
+        if any(w in q_low for w in ["leave", "leaves", "absent", "vacation", "holiday", "off"]):
+            if group_id != "all":
+                c.execute("""
+                    SELECT sender_name, timestamp, content 
+                    FROM teams_messages 
+                    WHERE (lower(content) LIKE '%leave%' OR lower(content) LIKE '%fever%' OR lower(content) LIKE '%absent%')
+                      AND (project_id = ? OR project_id = 'all')
+                    ORDER BY timestamp DESC
+                """, (group_id,))
+            else:
+                c.execute("""
+                    SELECT sender_name, timestamp, content 
+                    FROM teams_messages 
+                    WHERE (lower(content) LIKE '%leave%' OR lower(content) LIKE '%fever%' OR lower(content) LIKE '%absent%')
+                    ORDER BY timestamp DESC
+                """)
+            leave_rows = c.fetchall()
+            if leave_rows:
+                items_str = "\n".join(f"- **[Teams: {r['sender_name']} @ {r['timestamp'][:10]}]**: {r['content']}" for r in leave_rows)
+                return (
+                    f"### 🎯 Executive Ground Truth\n"
+                    f"A total of **{len(leave_rows)} leave record(s)** were identified in workspace communications:\n\n"
+                    f"### 📜 Verified Leave Notices\n{items_str}\n\n"
+                    f"### ⚡ Summary\n"
+                    f"- **Total Leave Entries**: {len(leave_rows)}\n"
+                    f"- All records sourced directly from verified Microsoft Teams chat messages."
+                )
+
+        # 4. General Keyword Search across Communications
+        tokens = [w for w in re.findall(r'\b[a-zA-Z0-9_-]{3,}\b', q_low) if w not in {"how", "many", "took", "what", "when", "where", "which", "there", "have", "been", "with", "from", "that", "this", "tell", "about", "show"}]
+        if tokens:
+            like_clauses = " OR ".join(["lower(content) LIKE ?"] * len(tokens))
+            params = [f"%{t}%" for t in tokens]
+            if group_id != "all":
+                c.execute(f"SELECT sender_name, timestamp, content FROM teams_messages WHERE ({like_clauses}) AND (project_id = ? OR project_id = 'all') ORDER BY id DESC LIMIT 5", tuple(params + [group_id]))
+            else:
+                c.execute(f"SELECT sender_name, timestamp, content FROM teams_messages WHERE ({like_clauses}) ORDER BY id DESC LIMIT 5", tuple(params))
+            matched_msgs = c.fetchall()
+            if matched_msgs:
+                msg_str = "\n".join(f"- **[Teams: {m['sender_name']} @ {m['timestamp'][:10]}]**: {m['content'][:300]}" for m in matched_msgs)
+                return (
+                    f"### 🎯 Executive Ground Truth\n"
+                    f"Resolved from latest project communications for query: *{query}*\n\n"
+                    f"### 💬 Recent Stakeholder Signals\n{msg_str}\n\n"
+                    f"### ⚡ Actionable Next Steps\n- Corroborated with active Teams workspace messages."
+                )
+
+        # 5. Default recent communication signals fallback
         if group_id != "all":
             c.execute("SELECT sender_name, timestamp, content FROM teams_messages WHERE is_technical_signal = 1 AND project_id = ? ORDER BY id DESC LIMIT 2", (group_id,))
         else:
@@ -80,7 +128,7 @@ def deterministic_grounded_answer(query: str, group_id: str = "all") -> str:
                 f"### 🎯 Executive Ground Truth\n"
                 f"Resolved from latest project communications for: *{query}*\n\n"
                 f"### 💬 Recent Stakeholder Signals\n{msg_str}\n\n"
-                f"### ⚡ Actionable Next Steps\n- Check individual PR commits in Azure DevOps."
+                f"### ⚡ Actionable Next Steps\n- Corroborated with active Teams workspace messages."
             )
 
     return f"No verified documentation or chat record found for: *{query}*."
@@ -104,43 +152,54 @@ def run_agent_query(user_query: str, session_id: str = "default_session", user_n
                 {"role": "system", "content": scoped_system_prompt},
                 {"role": "user", "content": user_query}
             ]
-            payload = {
-                "model": settings.GROQ_MODEL,
-                "messages": messages,
-                "tools": AGENT_TOOLS_DEFINITIONS,
-                "tool_choice": "auto",
-                "temperature": 0.0,
-                "max_tokens": 1024
-            }
+            models_to_try = [settings.GROQ_MODEL, "llama-3.1-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"]
+            active_model = None
             with httpx.Client(timeout=20.0) as client:
-                r1 = client.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
-                if r1.status_code == 200:
-                    choice = r1.json()["choices"][0]["message"]
-                    tool_calls = choice.get("tool_calls")
-                    if not tool_calls:
-                        if choice.get("content"):
-                            final_content = choice["content"]
-                    else:
-                        messages.append(choice)
-                        for tc in tool_calls:
-                            fn = tc["function"]["name"]
-                            args = json.loads(tc["function"]["arguments"]) if isinstance(tc["function"]["arguments"], str) else (tc["function"]["arguments"] or {})
-                            handler = TOOL_DISPATCHER.get(fn)
-                            output = handler(**args) if handler else json.dumps({"error": "Unknown tool"})
-                            evidence_trail.append({"tool": fn, "args": args, "output": output[:300]})
-                            messages.append({
-                                "role": "tool",
-                                "tool_call_id": tc["id"],
-                                "content": output
+                for cand_model in models_to_try:
+                    if not cand_model:
+                        continue
+                    payload = {
+                        "model": cand_model,
+                        "messages": messages,
+                        "tools": AGENT_TOOLS_DEFINITIONS,
+                        "tool_choice": "auto",
+                        "temperature": 0.0,
+                        "max_tokens": 1024
+                    }
+                    r1 = client.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
+                    if r1.status_code == 200:
+                        active_model = cand_model
+                        choice = r1.json()["choices"][0]["message"]
+                        tool_calls = choice.get("tool_calls")
+                        if not tool_calls:
+                            if choice.get("content"):
+                                final_content = choice["content"]
+                        else:
+                            messages.append(choice)
+                            for tc in tool_calls:
+                                fn = tc["function"]["name"]
+                                args = json.loads(tc["function"]["arguments"]) if isinstance(tc["function"]["arguments"], str) else (tc["function"]["arguments"] or {})
+                                handler = TOOL_DISPATCHER.get(fn)
+                                output = handler(**args) if handler else json.dumps({"error": "Unknown tool"})
+                                evidence_trail.append({"tool": fn, "args": args, "output": output[:300]})
+                                messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": tc["id"],
+                                    "content": output
+                                })
+                            r2 = client.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json={
+                                "model": active_model,
+                                "messages": messages,
+                                "temperature": 0.0,
+                                "max_tokens": 1024
                             })
-                        r2 = client.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json={
-                            "model": settings.GROQ_MODEL,
-                            "messages": messages,
-                            "temperature": 0.0,
-                            "max_tokens": 1024
-                        })
-                        if r2.status_code == 200:
-                            final_content = r2.json()["choices"][0]["message"].get("content")
+                            if r2.status_code == 200:
+                                final_content = r2.json()["choices"][0]["message"].get("content")
+                        break
+                    elif r1.status_code == 404:
+                        continue  # Try next model candidate
+                    else:
+                        break
         except Exception as e:
             print(f"[Tier 1 Groq REST Error]: {e}. Attempting fallback...")
 

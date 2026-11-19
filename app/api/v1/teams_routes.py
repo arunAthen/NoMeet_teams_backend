@@ -406,6 +406,15 @@ async def get_project_overview(group_id: Optional[str] = None):
             
             c.execute("SELECT count(*) FROM teams_messages WHERE is_technical_signal = 1 AND project_id = ?", (group_id,))
             total_msgs = c.fetchone()[0]
+        else:
+            c.execute("SELECT status, count(*) as count FROM project_items WHERE item_type = 'change_request' GROUP BY status")
+            crs = {r["status"]: r["count"] for r in c.fetchall()}
+            
+            c.execute("SELECT status, count(*) as count FROM project_items WHERE item_type = 'bug' GROUP BY status")
+            bugs = {r["status"]: r["count"] for r in c.fetchall()}
+            
+            c.execute("SELECT count(*) FROM teams_messages WHERE is_technical_signal = 1")
+            total_msgs = c.fetchone()[0]
 
         c.execute("SELECT count(*) FROM specs_fts")
         total_specs = c.fetchone()[0]

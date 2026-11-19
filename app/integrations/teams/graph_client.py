@@ -4,6 +4,7 @@ import httpx
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 from urllib.parse import unquote
+from pathlib import Path
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -345,6 +346,51 @@ async def sync_live_chat_messages(chat_id: str) -> Dict[str, Any]:
                         except Exception as ins_err:
                             logger.warning(f"Message insert notice: {ins_err}")
                 conn.commit()
+
+            # 3. Dynamic Live Files Sync from Microsoft Teams Chat Files
+            try:
+                candidate_uploaders = ["devadmin@athen.club"]
+                for msg in messages_data[:10]:
+                    if isinstance(msg, dict):
+                        f_info = msg.get("from") or {}
+                        if isinstance(f_info, dict):
+                            u_data = f_info.get("user") or {}
+                            if isinstance(u_data, dict):
+                                upn = u_data.get("userPrincipalName") or u_data.get("id")
+                                if upn and upn not in candidate_uploaders:
+                                    candidate_uploaders.append(upn)
+
+                settings.DATA_SYNC_DIR.mkdir(parents=True, exist_ok=True)
+                newly_downloaded = 0
+                for u_id in candidate_uploaders[:3]:
+                    try:
+                        files_url = f"https://graph.microsoft.com/v1.0/users/{u_id}/drive/root:/Microsoft Teams Chat Files:/children"
+                        f_resp = await client.get(files_url, headers=graph_headers)
+                        if f_resp.status_code == 200:
+                            for item in f_resp.json().get("value", []):
+                                fname = item.get("name")
+                                fid = item.get("id")
+                                fsize = item.get("size", 0)
+                                if fname and fid and any(fname.lower().endswith(ext) for ext in [".docx", ".xlsx", ".pdf", ".html", ".png", ".jpg"]):
+                                    target_file = settings.DATA_SYNC_DIR / fname
+                                    if not target_file.exists() or target_file.stat().st_size != fsize:
+                                        c_resp = await client.get(
+                                            f"https://graph.microsoft.com/v1.0/users/{u_id}/drive/items/{fid}/content",
+                                            headers=graph_headers,
+                                            follow_redirects=True
+                                        )
+                                        if c_resp.status_code == 200:
+                                            target_file.write_bytes(c_resp.content)
+                                            newly_downloaded += 1
+                                            logger.info(f"Downloaded new Teams file: {fname}")
+                    except Exception as fe:
+                        logger.warning(f"Error checking files for user {u_id}: {fe}")
+
+                if newly_downloaded > 0:
+                    from app.ingestion.dynamic_crawler import crawl_and_ingest_directory
+                    crawl_and_ingest_directory(settings.DATA_SYNC_DIR)
+            except Exception as shared_err:
+                logger.warning(f"Live files sync warning: {shared_err}")
 
             return {
                 "status": "success",

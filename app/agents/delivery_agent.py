@@ -225,7 +225,7 @@ def deterministic_grounded_answer(query: str, group_id: str = "all") -> str:
                 for sp in matched_specs[:2]:
                     doc_title = sp["doc_title"]
                     doc_badge = f"[Doc: {doc_title}]"
-                    sections.append(f"### 📄 {doc_badge}\n{sp['content'][:900]}")
+                    sections.append(f"### {doc_badge}\n{sp['content'][:900]}")
                 sections.append("### ⚡ Actionable Next Steps\n- Corroborated with verified requirements, UI design references, and architecture documents.")
                 return "\n\n".join(sections)
 

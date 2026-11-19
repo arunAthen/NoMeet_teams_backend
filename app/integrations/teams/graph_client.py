@@ -276,18 +276,6 @@ async def _download_and_ingest_file(
         except Exception as se:
             logger.warning(f"Drive search failed for {fname}: {se}")
 
-    # Strategy 5: Check seed_data / workspace copy
-    if not file_bytes:
-        seed_cand = settings.BASE_DIR / "data" / "seed_data" / fname
-        if seed_cand.exists():
-            file_bytes = seed_cand.read_bytes()
-        else:
-            local_cand = settings.BASE_DIR / fname
-            if not local_cand.exists():
-                local_cand = settings.BASE_DIR.parent / fname
-            if local_cand.exists():
-                file_bytes = local_cand.read_bytes()
-
     if not file_bytes:
         return False
 

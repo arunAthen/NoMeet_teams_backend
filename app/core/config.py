@@ -28,7 +28,7 @@ class Settings(BaseModel):
     PUBLIC_BASE_URL: str = os.getenv("PUBLIC_BASE_URL", "https://localhost:8000")
 
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
-    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
     GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY", "")
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
     ENABLE_EXTERNAL_LLM: bool = os.getenv("ENABLE_EXTERNAL_LLM", "true").lower() in ("true", "1")

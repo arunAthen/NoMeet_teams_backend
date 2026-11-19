@@ -220,7 +220,22 @@ def deterministic_grounded_answer(query: str, group_id: str = "all") -> str:
             for sp in matched_specs[:2]:
                 doc_title = sp["doc_title"]
                 doc_badge = f"[Doc: {doc_title}]"
-                sections.append(f"### {doc_badge}\n{sp['content'][:900]}")
+                full_content = sp.get("content", "")
+
+                # Smart paragraph extraction: prioritize paragraphs containing query tokens
+                paras = [p.strip() for p in full_content.split("\n") if p.strip()]
+                relevant_paras = []
+                for p in paras:
+                    plow = p.lower()
+                    if any(t in plow for t in tokens):
+                        relevant_paras.append(p)
+
+                if relevant_paras:
+                    extracted_text = "\n\n".join(relevant_paras[:6])
+                else:
+                    extracted_text = full_content[:1200]
+
+                sections.append(f"### {doc_badge}\n{extracted_text}")
             sections.append("### ⚡ Actionable Next Steps\n- Corroborated with verified requirements, UI design references, and architecture documents.")
             return "\n\n".join(sections)
 
@@ -267,23 +282,28 @@ def run_agent_query(user_query: str, session_id: str = "default_session", user_n
 
     scoped_system_prompt = f"{SYSTEM_PROMPT}\n\nCURRENT ACTIVE WORKSPACE / GROUP: '{group_id}'. Strict rule: Only return information that belongs to this workspace."
 
-    # Try Tier 1: Groq Cloud (llama-3.3-70b-versatile via direct REST API)
+    # Try Tier 1: Groq Cloud (direct REST API)
     if settings.ENABLE_EXTERNAL_LLM and settings.GROQ_API_KEY:
         try:
             import httpx
             headers = {
                 "Authorization": f"Bearer {settings.GROQ_API_KEY}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0"
             }
             messages = [
                 {"role": "system", "content": scoped_system_prompt},
                 {"role": "user", "content": user_query}
             ]
-            models_to_try = [settings.GROQ_MODEL, "llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
-            # Filter out known decommissioned models
+            models_to_try = [
+                settings.GROQ_MODEL,
+                "openai/gpt-oss-120b",
+                "openai/gpt-oss-20b",
+                "qwen/qwen3.8-27b",
+                "llama-3.3-70b-versatile",
+                "llama-3.1-8b-instant"
+            ]
             models_to_try = [m for m in dict.fromkeys(models_to_try) if m and m not in {"llama-3.1-70b-versatile", "mixtral-8x7b-32768"}]
-            if not models_to_try:
-                models_to_try = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
 
             active_model = None
             with httpx.Client(timeout=20.0) as client:
@@ -328,35 +348,52 @@ def run_agent_query(user_query: str, session_id: str = "default_session", user_n
                                     final_content = r2.json()["choices"][0]["message"].get("content")
                             break
                         else:
-                            # If 400 (e.g. tool_use_failed) or 404 (model not found), try next model
                             continue
-                    except Exception as model_err:
+                    except Exception:
                         continue
 
-                # Direct completion fallback with retrieved context if tool calling failed
+                # Direct completion fallback with retrieved document specs + chat context
                 if not final_content:
-                    retrieved_context = ""
+                    retrieved_context_parts = []
                     try:
                         clean_gid = group_id.split("@")[0].replace("19:", "").strip() if group_id and group_id != "all" else ""
                         with sqlite3.connect(DB_FILE) as conn:
                             conn.row_factory = sqlite3.Row
                             c = conn.cursor()
+
+                            # 1. Retrieve matching specifications and documents
+                            c.execute("SELECT doc_title, category, content FROM specs_fts")
+                            all_specs = [dict(r) for r in c.fetchall()]
+                            tokens = [w for w in re.findall(r'\b[a-zA-Z0-9_-]{3,}\b', user_query.lower()) if w not in {"what", "when", "where", "which", "how", "many", "does", "from", "that", "this", "tell", "show", "with", "about", "are", "there", "for"}]
+                            scored = []
+                            for s in all_specs:
+                                score = sum(3 for t in tokens if t in s["doc_title"].lower()) + sum(1 for t in tokens if t in s["content"].lower())
+                                if score > 0:
+                                    scored.append((score, s))
+                            scored.sort(key=lambda x: x[0], reverse=True)
+                            if scored:
+                                doc_snippets = [f"=== [Doc: {item[1]['doc_title']}] ===\n{item[1]['content'][:3500]}" for item in scored[:3]]
+                                retrieved_context_parts.append("VERIFIED DOCUMENTS & SPECIFICATIONS:\n" + "\n\n".join(doc_snippets))
+
+                            # 2. Retrieve recent communications
                             if clean_gid:
-                                c.execute("SELECT sender_name, timestamp, content FROM teams_messages WHERE (project_id = ? OR project_id LIKE ? OR project_id = 'all') ORDER BY id DESC LIMIT 15", (group_id, f"%{clean_gid}%"))
+                                c.execute("SELECT sender_name, timestamp, content FROM teams_messages WHERE (project_id = ? OR project_id LIKE ? OR project_id = 'all') ORDER BY id DESC LIMIT 10", (group_id, f"%{clean_gid}%"))
                             else:
-                                c.execute("SELECT sender_name, timestamp, content FROM teams_messages ORDER BY id DESC LIMIT 15")
+                                c.execute("SELECT sender_name, timestamp, content FROM teams_messages ORDER BY id DESC LIMIT 10")
                             rows = c.fetchall()
                             if rows:
-                                retrieved_context = "\n".join(f"- [{r['sender_name']} @ {r['timestamp'][:10]}]: {r['content']}" for r in rows)
+                                msg_snippets = "\n".join(f"- [{r['sender_name']} @ {r['timestamp'][:10]}]: {r['content']}" for r in rows)
+                                retrieved_context_parts.append("RECENT WORKSPACE COMMUNICATIONS:\n" + msg_snippets)
                     except Exception:
                         pass
 
-                    for fallback_model in ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]:
+                    full_context = "\n\n".join(retrieved_context_parts)
+                    for fallback_model in models_to_try:
                         try:
                             direct_payload = {
                                 "model": fallback_model,
                                 "messages": [
-                                    {"role": "system", "content": f"{scoped_system_prompt}\n\nWorkspace Context:\n{retrieved_context}"},
+                                    {"role": "system", "content": f"{scoped_system_prompt}\n\nWorkspace Context:\n{full_context}"},
                                     {"role": "user", "content": user_query}
                                 ],
                                 "temperature": 0.1,

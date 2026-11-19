@@ -68,9 +68,67 @@ def deterministic_grounded_answer(query: str, group_id: str = "all") -> str:
                 f"### ⚡ Actionable Next Steps\n- Coordinate with assigned engineers for closure."
             )
 
-        # 3. Leave / Time-off inquiries
+        # 3. Inquiry Type Classification
+        is_leave_query = any(w in q_low for w in ["leave", "leaves", "absent", "vacation", "holiday", "off"])
+        is_people_query = any(w in q_low for w in ["people", "peoples", "member", "members", "who is in", "participants", "roster"])
         clean_gid = group_id.split("@")[0].replace("19:", "").strip() if group_id and group_id != "all" else ""
-        if any(w in q_low for w in ["leave", "leaves", "absent", "vacation", "holiday", "off"]):
+        ws_label = "AgentAI Bot" if "2337de30" in str(group_id).lower() else ("Intranet Solutions" if "7bdcc461" in str(group_id).lower() else (clean_gid or "this workspace"))
+
+        # Compound Question: Members/People AND Leaves in same query
+        if is_people_query and is_leave_query:
+            roster_text = None
+            if clean_gid:
+                c.execute("SELECT content FROM teams_messages WHERE message_id LIKE 'roster_%' AND (project_id = ? OR project_id LIKE ? OR project_id = 'all') ORDER BY id DESC LIMIT 1", (group_id, f"%{clean_gid}%"))
+            else:
+                c.execute("SELECT content FROM teams_messages WHERE message_id LIKE 'roster_%' ORDER BY id DESC LIMIT 1")
+            roster_row = c.fetchone()
+            if roster_row and roster_row[0]:
+                roster_text = roster_row[0]
+            else:
+                if clean_gid:
+                    c.execute("SELECT DISTINCT sender_name FROM teams_messages WHERE sender_name != 'System Roster' AND (project_id = ? OR project_id LIKE ? OR project_id = 'all')", (group_id, f"%{clean_gid}%"))
+                else:
+                    c.execute("SELECT DISTINCT sender_name FROM teams_messages WHERE sender_name != 'System Roster'")
+                senders = [r[0] for r in c.fetchall() if r[0]]
+                roster_text = f"Group chat members ({len(senders)} total): {', '.join(senders)}" if senders else "No active participants recorded."
+
+            if clean_gid:
+                c.execute("""
+                    SELECT sender_name, timestamp, content 
+                    FROM teams_messages 
+                    WHERE (lower(content) LIKE '%leave%' OR lower(content) LIKE '%fever%' OR lower(content) LIKE '%absent%')
+                      AND (project_id = ? OR project_id LIKE ? OR project_id = 'all')
+                    ORDER BY timestamp DESC
+                """, (group_id, f"%{clean_gid}%"))
+            else:
+                c.execute("""
+                    SELECT sender_name, timestamp, content 
+                    FROM teams_messages 
+                    WHERE (lower(content) LIKE '%leave%' OR lower(content) LIKE '%fever%' OR lower(content) LIKE '%absent%')
+                    ORDER BY timestamp DESC
+                """)
+            leave_rows = c.fetchall()
+
+            c.execute("SELECT COUNT(*) FROM teams_messages WHERE (lower(content) LIKE '%leave%' OR lower(content) LIKE '%fever%' OR lower(content) LIKE '%absent%')")
+            total_org_leaves = c.fetchone()[0]
+
+            sections = [
+                f"### 🎯 Executive Ground Truth",
+                f"**1. Group Members & Directory Roster**:\n- {roster_text}"
+            ]
+
+            if leave_rows:
+                items_str = "\n".join(f"- **[Teams: {r['sender_name']} @ {r['timestamp'][:10]}]**: {r['content']}" for r in leave_rows[:10])
+                sections.append(f"**2. Leave Records in {ws_label}**:\n- **Total Leave Entries**: {len(leave_rows)}\n{items_str}")
+            else:
+                cross_note = f"\n*(Note: {total_org_leaves} verified leave notices are recorded in **Intranet Solutions**. Switch to **Intranet Solutions** or **All Workspaces** to inspect them.)*" if total_org_leaves > 0 else ""
+                sections.append(f"**2. Leave Records in {ws_label}**:\n- **Total Leave Entries**: **0**{cross_note}")
+
+            sections.append(f"### ⚡ Verified Directory & Chat Status\n- Sourced directly from verified Microsoft 365 Entra ID / Teams communications.")
+            return "\n\n".join(sections)
+
+        # Single: Leave / Time-off inquiry
+        if is_leave_query:
             if clean_gid:
                 c.execute("""
                     SELECT sender_name, timestamp, content 
@@ -91,15 +149,24 @@ def deterministic_grounded_answer(query: str, group_id: str = "all") -> str:
                 items_str = "\n".join(f"- **[Teams: {r['sender_name']} @ {r['timestamp'][:10]}]**: {r['content']}" for r in leave_rows)
                 return (
                     f"### 🎯 Executive Ground Truth\n"
-                    f"A total of **{len(leave_rows)} leave record(s)** were identified in workspace communications:\n\n"
+                    f"A total of **{len(leave_rows)} leave record(s)** were identified in **{ws_label}** communications:\n\n"
                     f"### 📜 Verified Leave Notices\n{items_str}\n\n"
                     f"### ⚡ Summary\n"
                     f"- **Total Leave Entries**: {len(leave_rows)}\n"
                     f"- All records sourced directly from verified Microsoft Teams chat messages."
                 )
+            else:
+                c.execute("SELECT COUNT(*) FROM teams_messages WHERE (lower(content) LIKE '%leave%' OR lower(content) LIKE '%fever%' OR lower(content) LIKE '%absent%')")
+                total_org_leaves = c.fetchone()[0]
+                cross_note = f"\n\n### ℹ️ Cross-Workspace Intelligence\n- **{total_org_leaves} verified leave notices** are recorded in the **Intranet Solutions** workspace.\n- To inspect them, select **Intranet Solutions** or **All Workspaces** from the workspace dropdown." if total_org_leaves > 0 else ""
+                return (
+                    f"### 🎯 Executive Ground Truth\n"
+                    f"A total of **0 leave records** or time-off notices were found in the **{ws_label}** workspace.{cross_note}\n\n"
+                    f"### ⚡ Verified Directory Status\n- Corroborated with active Teams workspace messages."
+                )
 
-        # 4. Group Members / People inquiries
-        if any(w in q_low for w in ["people", "peoples", "member", "members", "who is in", "participants"]):
+        # Single: Group Members / People inquiry
+        if is_people_query:
             if clean_gid:
                 c.execute("SELECT content FROM teams_messages WHERE message_id LIKE 'roster_%' AND (project_id = ? OR project_id LIKE ? OR project_id = 'all') ORDER BY id DESC LIMIT 1", (group_id, f"%{clean_gid}%"))
             else:

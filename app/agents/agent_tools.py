@@ -62,6 +62,17 @@ def search_project_records(keywords: str, limit: int = 5) -> str:
             except Exception:
                 pass
 
+            # Direct fallback search on specs_fts table
+            if not any(r["type"] == "spec" for r in results):
+                try:
+                    for t in terms[:3]:
+                        c.execute("SELECT doc_title, content FROM specs_fts WHERE content LIKE ? OR doc_title LIKE ? LIMIT ?", (f"%{t}%", f"%{t}%", limit))
+                        for r in c.fetchall():
+                            if not any(x.get("citation") == f"[Doc: {r[0]}]" for x in results):
+                                results.append({"type": "spec", "citation": f"[Doc: {r[0]}]", "text": r[1][:500]})
+                except Exception:
+                    pass
+
             # Direct fallback search on teams_messages table
             if not any(r["type"] == "teams" for r in results):
                 try:

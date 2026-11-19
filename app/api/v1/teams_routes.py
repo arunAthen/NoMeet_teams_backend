@@ -281,6 +281,16 @@ async def execute_query(req: QueryRequest):
     uid = req.user_id or "default_user"
     uname = req.user_name or "Team Member"
 
+    # Auto-hydrate specs_fts if empty
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            c = conn.cursor()
+            c.execute("SELECT count(*) FROM specs_fts")
+            if c.fetchone()[0] == 0:
+                sync_sharepoint_files_delta()
+    except Exception as e:
+        logger.warning(f"Specs auto-hydration notice: {e}")
+
     if not session_id:
         with sqlite3.connect(DB_FILE) as conn:
             c = conn.cursor()
@@ -397,20 +407,15 @@ async def get_project_overview(group_id: Optional[str] = None):
             c.execute("SELECT count(*) FROM teams_messages WHERE is_technical_signal = 1 AND project_id = ?", (group_id,))
             total_msgs = c.fetchone()[0]
 
-            c.execute("SELECT count(*) FROM specs_fts")
-            total_specs = c.fetchone()[0]
-        else:
-            c.execute("SELECT status, count(*) as count FROM project_items WHERE item_type = 'change_request' GROUP BY status")
-            crs = {r["status"]: r["count"] for r in c.fetchall()}
-            
-            c.execute("SELECT status, count(*) as count FROM project_items WHERE item_type = 'bug' GROUP BY status")
-            bugs = {r["status"]: r["count"] for r in c.fetchall()}
-            
-            c.execute("SELECT count(*) FROM teams_messages WHERE is_technical_signal = 1")
-            total_msgs = c.fetchone()[0]
-
-            c.execute("SELECT count(*) FROM specs_fts")
-            total_specs = c.fetchone()[0]
+        c.execute("SELECT count(*) FROM specs_fts")
+        total_specs = c.fetchone()[0]
+        if total_specs == 0:
+            try:
+                sync_sharepoint_files_delta()
+                c.execute("SELECT count(*) FROM specs_fts")
+                total_specs = c.fetchone()[0]
+            except Exception:
+                pass
 
     return {
         "group_id": group_id or "all",

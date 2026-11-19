@@ -24,8 +24,20 @@ def crawl_and_ingest_directory(root_dir: Path, project_id: str = "teams_delivery
         return stats
 
     with sqlite3.connect(DB_FILE) as conn:
+        try:
+            conn.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS specs_fts USING fts5(
+                    doc_title, category, content, tokenize='porter unicode61'
+                );
+            """)
+            conn.commit()
+        except Exception:
+            pass
+
         for file_path in root_dir.rglob("*"):
             if not file_path.is_file():
+                continue
+            if file_path.name.startswith("~$") or file_path.name.startswith("."):
                 continue
             stats["files_scanned"] += 1
             ext = file_path.suffix.lower()
@@ -100,6 +112,35 @@ def crawl_and_ingest_directory(root_dir: Path, project_id: str = "teams_delivery
                             VALUES (?, ?, ?)
                         """, (ck["doc_title"], ck["category"], ck["content"]))
                         stats["specs_indexed"] += 1
+
+                # 5. UI Mockup Images (.png, .jpg)
+                elif ext in (".png", ".jpg", ".jpeg"):
+                    clean_name = fname.replace("_", " ").replace("-", " ")
+                    title_name = os.path.splitext(clean_name)[0].title()
+                    mockup_descriptions = {
+                        "ui 01 kiosk welcome": "UI Mockup: Kiosk Welcome Screen. Displays visitor welcome interface, QR code scan option for pre-registered guests, and Walk-in check-in button.",
+                        "ui 02 kiosk documents and photo": "UI Mockup: Kiosk Documents, NDA and Photo Capture Screen. Where visitors review terms, provide digital signature, and take badge photo.",
+                        "ui 03 reception dashboard": "UI Mockup: Reception Dashboard (Today View). Front desk interface displaying on-site visitors list, check-in and check-out timestamps, and host notifications.",
+                        "ui 04 pre register visit": "UI Mockup: Pre-register Visit Modal. Form for hosts to register upcoming visits with visitor name, email, company, host, date/time, and purpose.",
+                        "ui 05 visitor badge": "UI Mockup: Visitor Badge Template. Printable badge layout featuring visitor photo, name, QR code, company, host name, and valid date.",
+                        "ui 06 emergency roll call mobile": "UI Mockup: Mobile Emergency Roll Call. Real-time emergency evacuation interface showing on-site headcounts by zone with accounted-for toggles.",
+                        "ui 07 reports dashboard": "UI Mockup: Reports and Analytics Dashboard. Charts and metrics for total visits, peak check-in hours, top visitor companies, and visit purposes."
+                    }
+                    desc = None
+                    for key, val in mockup_descriptions.items():
+                        if key in clean_name.lower():
+                            desc = val
+                            break
+                    if not desc:
+                        desc = f"UI Mockup reference: {title_name}. Visual specification and layout design."
+
+                    doc_title = f"UI Mockup: {fname}"
+                    conn.execute("DELETE FROM specs_fts WHERE doc_title = ?", (doc_title,))
+                    conn.execute("""
+                        INSERT INTO specs_fts (doc_title, category, content)
+                        VALUES (?, 'ui_mockup', ?)
+                    """, (doc_title, desc))
+                    stats["specs_indexed"] += 1
 
                 conn.commit()
             except Exception as err:

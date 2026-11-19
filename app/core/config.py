@@ -24,7 +24,7 @@ class Settings(BaseModel):
     BASE_DIR: Path = BASE_DIR
     DATABASE_PATH: Path = (Path("/tmp") / "teams_365_agent.db") if is_vercel else (BASE_DIR / os.getenv("DATABASE_PATH", "data/teams_365_agent.db"))
     DATA_SYNC_DIR: Path = (Path("/tmp") / "files_sync") if is_vercel else (BASE_DIR / os.getenv("DATA_SYNC_DIR", "data/files_sync"))
-    SEED_DATA_DIR: Path = (Path("/tmp") / "seed_data") if is_vercel else (BASE_DIR / os.getenv("SEED_DATA_DIR", "data/seed_data"))
+    SEED_DATA_DIR: Path = (BASE_DIR / "data" / "seed_data") if (BASE_DIR / "data" / "seed_data").exists() else (Path("/tmp") / "seed_data")
     PUBLIC_BASE_URL: str = os.getenv("PUBLIC_BASE_URL", "https://localhost:8000")
 
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")

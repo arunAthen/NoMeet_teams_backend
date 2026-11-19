@@ -194,7 +194,42 @@ def deterministic_grounded_answer(query: str, group_id: str = "all") -> str:
                     f"- Based on active message authors in workspace records."
                 )
 
-        # 5. General Keyword Search across Communications
+        # 5. Technical Specifications & Document Inquiries (specs_fts)
+        spec_trigger_words = [
+            "visitor", "register", "kiosk", "badge", "check-in", "checkin", "walk-in", "roll call", "nda",
+            "scope", "requirement", "requirements", "goal", "vision", "role", "roles", "permission",
+            "dashboard", "pre-register", "invitation", "qr", "sharepoint", "watchlist", "retention", "erasure", "criteria",
+            "spec", "specification", "doc", "document", "mockup", "ui", "screen", "flow", "feature", "time", "seconds", "minute"
+        ]
+        if any(w in q_low for w in spec_trigger_words):
+            tokens = [w for w in re.findall(r'\b[a-zA-Z0-9_-]{3,}\b', q_low) if w not in {"what", "when", "where", "which", "how", "many", "does", "from", "that", "this", "tell", "show", "with", "about", "are", "there", "for"}]
+            matched_specs = []
+            if tokens:
+                try:
+                    c.execute("SELECT doc_title, category, content FROM specs_fts")
+                    all_specs = [dict(r) for r in c.fetchall()]
+                    scored = []
+                    for s in all_specs:
+                        clow = s["content"].lower()
+                        tlow = s["doc_title"].lower()
+                        score = sum(3 for t in tokens if t in tlow) + sum(1 for t in tokens if t in clow)
+                        if score > 0:
+                            scored.append((score, s))
+                    scored.sort(key=lambda x: x[0], reverse=True)
+                    matched_specs = [item[1] for item in scored[:3]]
+                except Exception:
+                    pass
+
+            if matched_specs:
+                sections = [f"### 🎯 Executive Ground Truth\nResolved from verified specifications and architecture documentation for: *{query}*"]
+                for sp in matched_specs[:2]:
+                    doc_title = sp["doc_title"]
+                    doc_badge = f"[Doc: {doc_title}]"
+                    sections.append(f"### 📄 {doc_badge}\n{sp['content'][:900]}")
+                sections.append("### ⚡ Actionable Next Steps\n- Corroborated with verified requirements, UI design references, and architecture documents.")
+                return "\n\n".join(sections)
+
+        # 6. General Keyword Search across Communications
         tokens = [w for w in re.findall(r'\b[a-zA-Z0-9_-]{3,}\b', q_low) if w not in {"how", "many", "took", "what", "when", "where", "which", "there", "have", "been", "with", "from", "that", "this", "tell", "about", "show"}]
         if tokens:
             like_clauses = " OR ".join(["lower(content) LIKE ?"] * len(tokens))

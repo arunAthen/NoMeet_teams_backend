@@ -30,7 +30,7 @@ def deterministic_grounded_answer(query: str, group_id: str = "all") -> str:
         c = conn.cursor()
 
         # 1. Change Requests
-        if any(w in q_low for w in ["cr", "change request"]):
+        if re.search(r'\b(cr|crs|change\s+requests?)\b', q_low):
             if group_id != "all":
                 c.execute("SELECT status, count(*) as count FROM project_items WHERE item_type = 'change_request' AND project_id = ? GROUP BY status", (group_id,))
             else:
@@ -48,7 +48,7 @@ def deterministic_grounded_answer(query: str, group_id: str = "all") -> str:
             )
 
         # 2. Bugs
-        if any(w in q_low for w in ["bug", "defect"]):
+        if re.search(r'\b(bugs?|defects?)\b', q_low):
             if group_id != "all":
                 c.execute("SELECT status, count(*) as count FROM project_items WHERE item_type = 'bug' AND project_id = ? GROUP BY status", (group_id,))
             else:
@@ -69,8 +69,8 @@ def deterministic_grounded_answer(query: str, group_id: str = "all") -> str:
             )
 
         # 3. Inquiry Type Classification
-        is_leave_query = any(w in q_low for w in ["leave", "leaves", "absent", "vacation", "holiday", "off"])
-        is_people_query = any(w in q_low for w in ["people", "peoples", "member", "members", "who is in", "participants", "roster"])
+        is_leave_query = bool(re.search(r'\b(leaves?|absent|vacations?|holidays?|time\s*off)\b', q_low))
+        is_people_query = bool(re.search(r'\b(people|peoples|members?|who\s+is\s+in|participants?|roster)\b', q_low))
         clean_gid = group_id.split("@")[0].replace("19:", "").strip() if group_id and group_id != "all" else ""
         ws_label = "AgentAI Bot" if "2337de30" in str(group_id).lower() else ("Intranet Solutions" if "7bdcc461" in str(group_id).lower() else (clean_gid or "this workspace"))
 

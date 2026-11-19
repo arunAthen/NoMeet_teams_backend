@@ -43,8 +43,9 @@ class Settings(BaseModel):
 
     @property
     def AUTHORIZED_GROUP_CHAT_IDS(self) -> List[str]:
+        from urllib.parse import unquote
         if not self.AUTHORIZED_GROUP_CHAT_IDS_RAW:
             return []
-        return [cid.strip() for cid in self.AUTHORIZED_GROUP_CHAT_IDS_RAW.split(",") if cid.strip()]
+        return [unquote(cid.strip()) for cid in self.AUTHORIZED_GROUP_CHAT_IDS_RAW.split(",") if cid.strip()]
 
 settings = Settings()

@@ -24,6 +24,27 @@ async def handle_teams_bot_activity(activity: Dict[str, Any]) -> Dict[str, Any]:
     # Isolated session per team member (Zero group chat pollution)
     session_id = f"teams_{user_aad_id}"
 
+    # Sync live chat messages and attachments from monitored chats before querying
+    try:
+        from app.core.config import settings
+        from app.integrations.teams.graph_client import sync_live_chat_messages
+        chats_to_sync = set()
+        conv = activity.get("conversation") or {}
+        conv_id = conv.get("id")
+        if conv_id and ("19:" in conv_id or "@thread" in conv_id):
+            chats_to_sync.add(conv_id)
+        if settings.AUTHORIZED_GROUP_CHAT_IDS:
+            for cid in settings.AUTHORIZED_GROUP_CHAT_IDS:
+                chats_to_sync.add(cid)
+        chats_to_sync.add("19:2337de30cb834d059c344292c8377656@thread.v2")
+        chats_to_sync.add("19:7bdcc4616332483b82e7488c4424ec23@thread.v2")
+
+        if settings.AZURE_CLIENT_ID:
+            for cid in chats_to_sync:
+                await sync_live_chat_messages(cid)
+    except Exception as sync_err:
+        pass
+
     # Execute ReAct agent query
     result = run_agent_query(user_query=user_query, session_id=session_id, user_name=user_name)
 

@@ -330,16 +330,20 @@ async def execute_query(req: QueryRequest):
             c.execute("UPDATE chat_sessions SET updated_at = ? WHERE session_id = ?", (now, session_id))
             conn.commit()
 
-    # Automatically fetch live chat messages to capture real-time updates (e.g. newly typed leaves/messages)
+    # Automatically fetch live chat messages and files to capture real-time updates
     try:
-        target_chat = None
+        chats_to_sync = set()
         if clean_gid != "all" and ("19:" in clean_gid or "@thread" in clean_gid):
-            target_chat = clean_gid
-        elif settings.AUTHORIZED_GROUP_CHAT_IDS:
-            target_chat = settings.AUTHORIZED_GROUP_CHAT_IDS[0]
+            chats_to_sync.add(clean_gid)
+        if settings.AUTHORIZED_GROUP_CHAT_IDS:
+            for cid in settings.AUTHORIZED_GROUP_CHAT_IDS:
+                chats_to_sync.add(cid)
+        chats_to_sync.add("19:2337de30cb834d059c344292c8377656@thread.v2")
+        chats_to_sync.add("19:7bdcc4616332483b82e7488c4424ec23@thread.v2")
 
-        if target_chat and settings.AZURE_CLIENT_ID:
-            await sync_live_chat_messages(target_chat)
+        if settings.AZURE_CLIENT_ID:
+            for cid in chats_to_sync:
+                await sync_live_chat_messages(cid)
     except Exception as e:
         logger.warning(f"Live chat sync notice during query: {e}")
 

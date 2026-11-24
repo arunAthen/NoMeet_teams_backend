@@ -280,7 +280,69 @@ def run_agent_query(user_query: str, session_id: str = "default_session", user_n
     final_content = None
     evidence_trail = []
 
+    clean_gid = group_id.split("@")[0].replace("19:", "").strip() if group_id and group_id != "all" else ""
     scoped_system_prompt = f"{SYSTEM_PROMPT}\n\nCURRENT ACTIVE WORKSPACE / GROUP: '{group_id}'. Strict rule: Only return information that belongs to this workspace."
+
+    # 1. Dynamic Search Feed (Solution 2 - Real-Time RAG across Documents and Chat)
+    retrieved_context_parts = []
+    tokens = [w for w in re.findall(r'\b[a-zA-Z0-9_-]{3,}\b', user_query.lower()) if w not in {"what", "when", "where", "which", "how", "many", "does", "from", "that", "this", "tell", "show", "with", "about", "are", "there", "for", "took", "take"}]
+    is_leave_query = any(w in user_query.lower() for w in ["leave", "absent", "fever", "sick", "holiday", "vacation", "time off"])
+    found_leave_records = []
+
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+
+            # 1a. Retrieve matching specifications and documents
+            c.execute("SELECT doc_title, category, content FROM specs_fts")
+            all_specs = [dict(r) for r in c.fetchall()]
+            scored = []
+            for s in all_specs:
+                score = sum(3 for t in tokens if t in s["doc_title"].lower()) + sum(1 for t in tokens if t in s["content"].lower())
+                if score > 0:
+                    scored.append((score, s))
+            scored.sort(key=lambda x: x[0], reverse=True)
+            if scored:
+                doc_snippets = [f"=== [Doc: {item[1]['doc_title']}] ===\n{item[1]['content'][:3500]}" for item in scored[:3]]
+                retrieved_context_parts.append("VERIFIED DOCUMENTS & SPECIFICATIONS:\n" + "\n\n".join(doc_snippets))
+
+            # 1b. Retrieve live chat messages for leave/status if relevant
+            if is_leave_query:
+                if clean_gid:
+                    c.execute("""
+                        SELECT sender_name, timestamp, content 
+                        FROM teams_messages 
+                        WHERE (lower(content) LIKE '%leave%' OR lower(content) LIKE '%fever%' OR lower(content) LIKE '%absent%')
+                          AND (project_id = ? OR project_id LIKE ? OR project_id = 'all')
+                        ORDER BY id DESC LIMIT 15
+                    """, (group_id, f"%{clean_gid}%"))
+                else:
+                    c.execute("""
+                        SELECT sender_name, timestamp, content 
+                        FROM teams_messages 
+                        WHERE (lower(content) LIKE '%leave%' OR lower(content) LIKE '%fever%' OR lower(content) LIKE '%absent%')
+                        ORDER BY id DESC LIMIT 15
+                    """)
+                found_leave_records = [dict(r) for r in c.fetchall()]
+                if found_leave_records:
+                    leave_lines = "\n".join(f"- [Teams: {r['sender_name']} @ {r['timestamp'][:10]}]: {r['content']}" for r in found_leave_records)
+                    retrieved_context_parts.append("VERIFIED LEAVE & TIME-OFF NOTICES IN CHAT:\n" + leave_lines)
+
+            # 1c. Retrieve recent workspace communications
+            if clean_gid:
+                c.execute("SELECT sender_name, timestamp, content FROM teams_messages WHERE (project_id = ? OR project_id LIKE ? OR project_id = 'all') ORDER BY id DESC LIMIT 10", (group_id, f"%{clean_gid}%"))
+            else:
+                c.execute("SELECT sender_name, timestamp, content FROM teams_messages ORDER BY id DESC LIMIT 10")
+            recent_rows = [dict(r) for r in c.fetchall()]
+            if recent_rows and not is_leave_query:
+                msg_lines = "\n".join(f"- [Teams: {r['sender_name']} @ {r['timestamp'][:10]}]: {r['content']}" for r in recent_rows)
+                retrieved_context_parts.append("RECENT WORKSPACE CHAT COMMUNICATIONS:\n" + msg_lines)
+    except Exception as ctx_err:
+        logger.warning(f"Dynamic RAG context retrieval notice: {ctx_err}")
+
+    full_context_str = "\n\n".join(retrieved_context_parts)
+    system_prompt_with_rag = f"{scoped_system_prompt}\n\nREAL-TIME WORKSPACE EVIDENCE:\n{full_context_str}\n\nInstructions:\n- Synthesize an executive, structured, grounded answer using the real-time workspace evidence above.\n- If leave records are provided in the chat notices, count them and summarize each member's notice clearly.\n- Cite documents as [Doc: Title] and chat communications as [Teams: Sender @ Date]."
 
     # Try Tier 1: Groq Cloud (direct REST API)
     if settings.ENABLE_EXTERNAL_LLM and settings.GROQ_API_KEY:
@@ -292,7 +354,7 @@ def run_agent_query(user_query: str, session_id: str = "default_session", user_n
                 "User-Agent": "Mozilla/5.0"
             }
             messages = [
-                {"role": "system", "content": scoped_system_prompt},
+                {"role": "system", "content": system_prompt_with_rag},
                 {"role": "user", "content": user_query}
             ]
             models_to_try = [
@@ -305,108 +367,30 @@ def run_agent_query(user_query: str, session_id: str = "default_session", user_n
             ]
             models_to_try = [m for m in dict.fromkeys(models_to_try) if m and m not in {"llama-3.1-70b-versatile", "mixtral-8x7b-32768"}]
 
-            active_model = None
             with httpx.Client(timeout=20.0) as client:
                 for cand_model in models_to_try:
                     try:
                         payload = {
                             "model": cand_model,
                             "messages": messages,
-                            "tools": AGENT_TOOLS_DEFINITIONS,
-                            "tool_choice": "auto",
                             "temperature": 0.0,
                             "max_tokens": 1024
                         }
                         r1 = client.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
                         if r1.status_code == 200:
-                            active_model = cand_model
                             choice = r1.json()["choices"][0]["message"]
-                            tool_calls = choice.get("tool_calls")
-                            if not tool_calls:
-                                if choice.get("content"):
-                                    final_content = choice["content"]
-                            else:
-                                messages.append(choice)
-                                for tc in tool_calls:
-                                    fn = tc["function"]["name"]
-                                    args = json.loads(tc["function"]["arguments"]) if isinstance(tc["function"]["arguments"], str) else (tc["function"]["arguments"] or {})
-                                    handler = TOOL_DISPATCHER.get(fn)
-                                    output = handler(**args) if handler else json.dumps({"error": "Unknown tool"})
-                                    evidence_trail.append({"tool": fn, "args": args, "output": output[:300]})
-                                    messages.append({
-                                        "role": "tool",
-                                        "tool_call_id": tc["id"],
-                                        "content": output
-                                    })
-                                r2 = client.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json={
-                                    "model": active_model,
-                                    "messages": messages,
-                                    "temperature": 0.0,
-                                    "max_tokens": 1024
-                                })
-                                if r2.status_code == 200:
-                                    final_content = r2.json()["choices"][0]["message"].get("content")
-                            break
-                        else:
-                            continue
+                            if choice.get("content"):
+                                final_content = choice["content"]
+                                break
                     except Exception:
                         continue
-
-                # Direct completion fallback with retrieved document specs + chat context
-                if not final_content:
-                    retrieved_context_parts = []
-                    try:
-                        clean_gid = group_id.split("@")[0].replace("19:", "").strip() if group_id and group_id != "all" else ""
-                        with sqlite3.connect(DB_FILE) as conn:
-                            conn.row_factory = sqlite3.Row
-                            c = conn.cursor()
-
-                            # 1. Retrieve matching specifications and documents
-                            c.execute("SELECT doc_title, category, content FROM specs_fts")
-                            all_specs = [dict(r) for r in c.fetchall()]
-                            tokens = [w for w in re.findall(r'\b[a-zA-Z0-9_-]{3,}\b', user_query.lower()) if w not in {"what", "when", "where", "which", "how", "many", "does", "from", "that", "this", "tell", "show", "with", "about", "are", "there", "for"}]
-                            scored = []
-                            for s in all_specs:
-                                score = sum(3 for t in tokens if t in s["doc_title"].lower()) + sum(1 for t in tokens if t in s["content"].lower())
-                                if score > 0:
-                                    scored.append((score, s))
-                            scored.sort(key=lambda x: x[0], reverse=True)
-                            if scored:
-                                doc_snippets = [f"=== [Doc: {item[1]['doc_title']}] ===\n{item[1]['content'][:3500]}" for item in scored[:3]]
-                                retrieved_context_parts.append("VERIFIED DOCUMENTS & SPECIFICATIONS:\n" + "\n\n".join(doc_snippets))
-
-                            # 2. Retrieve recent communications
-                            if clean_gid:
-                                c.execute("SELECT sender_name, timestamp, content FROM teams_messages WHERE (project_id = ? OR project_id LIKE ? OR project_id = 'all') ORDER BY id DESC LIMIT 10", (group_id, f"%{clean_gid}%"))
-                            else:
-                                c.execute("SELECT sender_name, timestamp, content FROM teams_messages ORDER BY id DESC LIMIT 10")
-                            rows = c.fetchall()
-                            if rows:
-                                msg_snippets = "\n".join(f"- [{r['sender_name']} @ {r['timestamp'][:10]}]: {r['content']}" for r in rows)
-                                retrieved_context_parts.append("RECENT WORKSPACE COMMUNICATIONS:\n" + msg_snippets)
-                    except Exception:
-                        pass
-
-                    full_context = "\n\n".join(retrieved_context_parts)
-                    for fallback_model in models_to_try:
-                        try:
-                            direct_payload = {
-                                "model": fallback_model,
-                                "messages": [
-                                    {"role": "system", "content": f"{scoped_system_prompt}\n\nWorkspace Context:\n{full_context}"},
-                                    {"role": "user", "content": user_query}
-                                ],
-                                "temperature": 0.1,
-                                "max_tokens": 1024
-                            }
-                            r_direct = client.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=direct_payload)
-                            if r_direct.status_code == 200:
-                                final_content = r_direct.json()["choices"][0]["message"].get("content")
-                                break
-                        except Exception:
-                            continue
         except Exception as e:
             print(f"[Tier 1 Groq REST Error]: {e}. Attempting fallback...")
+
+    # Guard: If leave query had verified records but LLM hallucinated absence, use grounded answer
+    if is_leave_query and found_leave_records:
+        if not final_content or any(neg in final_content.lower() for neg in ["no record", "0 leave", "not recorded", "no leave"]):
+            final_content = deterministic_grounded_answer(user_query, group_id=group_id)
 
     # Fallback Tier 3: Deterministic Grounded Engine
     if not final_content:

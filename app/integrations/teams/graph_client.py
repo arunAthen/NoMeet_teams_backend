@@ -211,8 +211,16 @@ async def _download_and_ingest_file(
 
     file_bytes: Optional[bytes] = None
 
+    # Fast-path: Reuse already downloaded file on disk if available
+    if target_file.exists() and target_file.stat().st_size > 0:
+        try:
+            file_bytes = target_file.read_bytes()
+            logger.info(f"Reusing cached file on disk: {fname} ({len(file_bytes)} bytes)")
+        except Exception:
+            file_bytes = None
+
     # Strategy 1: Sharing URL conversion via Microsoft Graph /shares/u!{base64url}/driveItem/content
-    if content_url and ("sharepoint.com" in content_url or "1drv.ms" in content_url or "onedrive" in content_url):
+    if not file_bytes and content_url and ("sharepoint.com" in content_url or "1drv.ms" in content_url or "onedrive" in content_url):
         try:
             b64_raw = base64.b64encode(content_url.encode("utf-8")).decode("utf-8")
             encoded_share = "u!" + b64_raw.rstrip("=").replace("/", "_").replace("+", "-")
@@ -458,8 +466,10 @@ async def sync_live_chat_messages(chat_id: str) -> Dict[str, Any]:
 
                     # Collect text parts
                     text_parts = []
-                    if body and "<attachment" not in body.lower():
-                        clean_body = html.unescape(re.sub(r"<[^>]+>", " ", body)).strip()
+                    if body:
+                        # Clean out XML attachment placeholders while keeping all genuine user message text
+                        body_stripped = re.sub(r'<attachment[^>]*>.*?</attachment>', '', body, flags=re.DOTALL | re.IGNORECASE)
+                        clean_body = html.unescape(re.sub(r'<[^>]+>', ' ', body_stripped)).strip()
                         if clean_body:
                             text_parts.append(clean_body)
 
@@ -468,6 +478,8 @@ async def sync_live_chat_messages(chat_id: str) -> Dict[str, Any]:
                     for att in attachments:
                         if isinstance(att, dict):
                             att_content = att.get("content") or ""
+                            if isinstance(att_content, dict):
+                                att_content = json.dumps(att_content)
                             if isinstance(att_content, str):
                                 card_texts = re.findall(r'"(?:text|title|value|fallback)":\s*"([^"]+)"', att_content)
                                 if card_texts:
@@ -507,6 +519,7 @@ async def sync_live_chat_messages(chat_id: str) -> Dict[str, Any]:
             try:
                 valid_exts = (".docx", ".xlsx", ".pdf", ".html", ".png", ".jpg", ".jpeg")
                 newly_downloaded = 0
+                processed_fnames = set()
 
                 # 3a. Process all attachments referenced directly in live messages
                 for msg in messages_data:
@@ -520,6 +533,9 @@ async def sync_live_chat_messages(chat_id: str) -> Dict[str, Any]:
                             att_name = att.get("name")
                             content_url = att.get("contentUrl")
                             if att_name and any(att_name.lower().endswith(ext) for ext in valid_exts):
+                                if att_name.lower() in processed_fnames:
+                                    continue
+                                processed_fnames.add(att_name.lower())
                                 ok = await _download_and_ingest_file(
                                     client=client,
                                     graph_headers=graph_headers,
@@ -554,6 +570,9 @@ async def sync_live_chat_messages(chat_id: str) -> Dict[str, Any]:
                                 fname = item.get("name")
                                 fid = item.get("id")
                                 if fname and fid and any(fname.lower().endswith(ext) for ext in valid_exts):
+                                    if fname.lower() in processed_fnames:
+                                        continue
+                                    processed_fnames.add(fname.lower())
                                     ok = await _download_and_ingest_file(
                                         client=client,
                                         graph_headers=graph_headers,

@@ -427,6 +427,11 @@ async def get_project_overview(group_id: Optional[str] = None):
                 sync_sharepoint_files_delta()
                 c.execute("SELECT count(*) FROM specs_fts")
                 total_specs = c.fetchone()[0]
+                if group_id and group_id != "all":
+                    c.execute("SELECT count(*) FROM teams_messages WHERE is_technical_signal = 1 AND project_id = ?", (group_id,))
+                else:
+                    c.execute("SELECT count(*) FROM teams_messages WHERE is_technical_signal = 1")
+                total_msgs = c.fetchone()[0]
             except Exception:
                 pass
 

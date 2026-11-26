@@ -335,15 +335,17 @@ async def execute_query(req: QueryRequest):
         chats_to_sync = set()
         if clean_gid != "all" and ("19:" in clean_gid or "@thread" in clean_gid):
             chats_to_sync.add(clean_gid)
-        if settings.AUTHORIZED_GROUP_CHAT_IDS:
+        elif settings.AUTHORIZED_GROUP_CHAT_IDS:
             for cid in settings.AUTHORIZED_GROUP_CHAT_IDS:
                 chats_to_sync.add(cid)
-        chats_to_sync.add("19:2337de30cb834d059c344292c8377656@thread.v2")
-        chats_to_sync.add("19:7bdcc4616332483b82e7488c4424ec23@thread.v2")
+        else:
+            chats_to_sync.add("19:2337de30cb834d059c344292c8377656@thread.v2")
+            chats_to_sync.add("19:7bdcc4616332483b82e7488c4424ec23@thread.v2")
 
-        if settings.AZURE_CLIENT_ID:
-            for cid in chats_to_sync:
-                await sync_live_chat_messages(cid)
+        if settings.AZURE_CLIENT_ID and chats_to_sync:
+            import asyncio
+            sync_tasks = [sync_live_chat_messages(cid) for cid in chats_to_sync]
+            await asyncio.wait_for(asyncio.gather(*sync_tasks, return_exceptions=True), timeout=4.0)
     except Exception as e:
         logger.warning(f"Live chat sync notice during query: {e}")
 

@@ -2,11 +2,14 @@ import os
 import re
 import json
 import sqlite3
+import logging
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Tuple
 from app.core.config import settings
 from app.agents.agent_tools import AGENT_TOOLS_DEFINITIONS, TOOL_DISPATCHER, execute_sql_query, search_project_records
 from app.agents.evaluator import calculate_evaluation_metrics
+
+logger = logging.getLogger(__name__)
 
 DB_FILE = settings.DATABASE_PATH
 
@@ -146,13 +149,30 @@ def deterministic_grounded_answer(query: str, group_id: str = "all") -> str:
                 """)
             leave_rows = c.fetchall()
             if leave_rows:
+                # Group by sender_name
+                by_sender = {}
+                for r in leave_rows:
+                    sname = r['sender_name']
+                    dstr = r['timestamp'][:10]
+                    by_sender.setdefault(sname, []).append((dstr, r['content']))
+
+                table_lines = [
+                    "| Team Member | Number of Leave Days | Dates of Leave Notice |",
+                    "|---|---|---|"
+                ]
+                for sname, entries in by_sender.items():
+                    dates_set = sorted(list(set(e[0] for e in entries)))
+                    dates_str = ", ".join(dates_set)
+                    table_lines.append(f"| **{sname}** | **{len(entries)}** | {dates_str} |")
+
+                table_str = "\n".join(table_lines)
                 items_str = "\n".join(f"- **[Teams: {r['sender_name']} @ {r['timestamp'][:10]}]**: {r['content']}" for r in leave_rows)
                 return (
-                    f"### 🎯 Executive Ground Truth\n"
-                    f"A total of **{len(leave_rows)} leave record(s)** were identified in **{ws_label}** communications:\n\n"
+                    f"### 🎯 Executive Ground Truth\n\n"
+                    f"{table_str}\n\n"
+                    f"**Total Leave Days Recorded in {ws_label}:** **{len(leave_rows)}**\n\n"
                     f"### 📜 Verified Leave Notices\n{items_str}\n\n"
                     f"### ⚡ Summary\n"
-                    f"- **Total Leave Entries**: {len(leave_rows)}\n"
                     f"- All records sourced directly from verified Microsoft Teams chat messages."
                 )
             else:
@@ -342,7 +362,18 @@ def run_agent_query(user_query: str, session_id: str = "default_session", user_n
         logger.warning(f"Dynamic RAG context retrieval notice: {ctx_err}")
 
     full_context_str = "\n\n".join(retrieved_context_parts)
-    system_prompt_with_rag = f"{scoped_system_prompt}\n\nREAL-TIME WORKSPACE EVIDENCE:\n{full_context_str}\n\nInstructions:\n- Synthesize an executive, structured, grounded answer using the real-time workspace evidence above.\n- If leave records are provided in the chat notices, count them and summarize each member's notice clearly.\n- Cite documents as [Doc: Title] and chat communications as [Teams: Sender @ Date]."
+    system_prompt_with_rag = f"""{scoped_system_prompt}
+
+REAL-TIME WORKSPACE EVIDENCE:
+{full_context_str}
+
+CRITICAL EXTRACTION & FORMATTING RULES:
+1. In chat notices formatted as '[Teams: <SenderName> @ <Date>]: <content>', the name <SenderName> IS the team member taking leave.
+2. You MUST extract each team member's exact name and create an executive table listing:
+   | Team Member | Number of Leave Days | Dates of Leave Notice |
+3. Group all leave notices for the same person together (e.g. if Dev Admin has notices on 2026-11-19, 2026-11-20, and 2026-11-24, attribute all 3 days to Dev Admin).
+4. NEVER say 'cannot attribute' or 'no member identifiers present' when [Teams: Sender @ Date] tags exist in the evidence.
+5. Always cite documents as [Doc: Title] and chat communications as [Teams: Sender @ Date]."""
 
     # Try Tier 1: Groq Cloud (direct REST API)
     if settings.ENABLE_EXTERNAL_LLM and settings.GROQ_API_KEY:
@@ -387,9 +418,16 @@ def run_agent_query(user_query: str, session_id: str = "default_session", user_n
         except Exception as e:
             print(f"[Tier 1 Groq REST Error]: {e}. Attempting fallback...")
 
-    # Guard: If leave query had verified records but LLM hallucinated absence, use grounded answer
+    # Guard: If leave query had verified records but LLM hallucinated absence or did a lazy skip
+    lazy_phrases = [
+        "no record", "0 leave", "not recorded", "no leave",
+        "cannot attribute", "do not contain any explicit member", "does not contain any explicit member",
+        "member names and leave specifics are not present", "cannot attribute each notification",
+        "not present in the available evidence"
+    ]
     if is_leave_query and found_leave_records:
-        if not final_content or any(neg in final_content.lower() for neg in ["no record", "0 leave", "not recorded", "no leave"]):
+        if not final_content or any(neg in final_content.lower() for neg in lazy_phrases):
+            logger.info("Triggered deterministic grounded answer due to LLM lazy skip or absence hallucination.")
             final_content = deterministic_grounded_answer(user_query, group_id=group_id)
 
     # Fallback Tier 3: Deterministic Grounded Engine
